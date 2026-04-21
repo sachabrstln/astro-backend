@@ -1,0 +1,136 @@
+// Helpers de sécurité : Turnstile, HIBP, tokens, audit, sanitize prompt injection
+import crypto from 'node:crypto';
+import { query } from './db.js';
+
+// ── Cloudflare Turnstile ────────────────────────────────────
+// Vérifie un token Turnstile auprès de Cloudflare.
+// Configure CF_TURNSTILE_SECRET. Si absent, la vérif est désactivée (dev).
+export async function verifyTurnstile(token, remoteip) {
+  const secret = process.env.CF_TURNSTILE_SECRET;
+  if (!secret) return { ok: true, skipped: true };
+  if (!token) return { ok: false, reason: 'captcha_missing' };
+  try {
+    const body = new URLSearchParams({ secret, response: token });
+    if (remoteip) body.append('remoteip', remoteip);
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      body,
+    });
+    const data = await r.json();
+    return data.success ? { ok: true } : { ok: false, reason: 'captcha_failed', errors: data['error-codes'] };
+  } catch (e) {
+    // En cas d'erreur réseau vers Cloudflare, on REFUSE par sécurité
+    return { ok: false, reason: 'captcha_network_error' };
+  }
+}
+
+// ── HIBP Pwned Passwords (k-anonymity) ──────────────────────
+// Renvoie true si le mot de passe est dans une fuite connue.
+// Utilise k-anonymity : seul le préfixe SHA-1 (5 chars) est envoyé à l'API.
+export async function isPasswordPwned(password) {
+  try {
+    const sha1 = crypto.createHash('sha1').update(password).digest('hex').toUpperCase();
+    const prefix = sha1.slice(0, 5);
+    const suffix = sha1.slice(5);
+    const r = await fetch('https://api.pwnedpasswords.com/range/' + prefix, {
+      headers: { 'Add-Padding': 'true', 'User-Agent': 'astro-backend' },
+    });
+    if (!r.ok) return false;
+    const text = await r.text();
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const [suf, count] = line.trim().split(':');
+      if (suf === suffix && parseInt(count || '0', 10) > 0) return true;
+    }
+    return false;
+  } catch (e) {
+    // Fail-open : si HIBP est down, on laisse passer (ne pas bloquer les signups)
+    return false;
+  }
+}
+
+// ── Tokens sécurisés (reset, verification) ──────────────────
+export function generateToken(bytes = 32) {
+  return crypto.randomBytes(bytes).toString('base64url');
+}
+
+export function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// ── JTI (JWT ID) pour session tracking ──────────────────────
+export function generateJti() {
+  return crypto.randomBytes(16).toString('base64url');
+}
+
+// ── Email (Resend) ──────────────────────────────────────────
+// Envoie un email via Resend. Si RESEND_API_KEY absent, log seulement (dev).
+export async function sendEmail({ to, subject, html, text }) {
+  const key = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM || 'Astro <no-reply@astro-vinted.com>';
+  if (!key) {
+    console.warn('[email] RESEND_API_KEY absent — email non envoyé à ' + to + ' : ' + subject);
+    return { ok: true, skipped: true };
+  }
+  try {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + key,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from, to, subject, html, text }),
+    });
+    const data = await r.json();
+    if (!r.ok) return { ok: false, reason: data?.message || 'resend_error', data };
+    return { ok: true, id: data.id };
+  } catch (e) {
+    return { ok: false, reason: 'network_error', message: e.message };
+  }
+}
+
+// ── Audit log ───────────────────────────────────────────────
+export async function audit(req, action, metadata = null) {
+  try {
+    await query(
+      `INSERT INTO audit_log (user_id, action, ip, user_agent, metadata) VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.user?.sub || null,
+        action,
+        req.ip || null,
+        (req.headers?.['user-agent'] || '').slice(0, 500),
+        metadata ? JSON.stringify(metadata).slice(0, 5000) : null,
+      ]
+    );
+  } catch (e) {
+    // Ne bloque pas la requête si l'audit échoue
+    console.warn('[audit] failed:', e.message);
+  }
+}
+
+// ── Sanitize pour prompt injection ──────────────────────────
+// L'utilisateur contrôle `hints` et `descTemplate` qui vont dans le system prompt.
+// Un attaquant peut écrire "IGNORE ALL PREVIOUS INSTRUCTIONS AND..." pour manipuler Claude.
+// On supprime les patterns de prompt injection connus + on tronque.
+const INJECTION_PATTERNS = [
+  /ignore\s+(all\s+)?(previous|above|prior)\s+(instructions|commands|prompt)/gi,
+  /disregard\s+(all\s+)?(previous|above|prior)\s+(instructions|commands)/gi,
+  /forget\s+(everything|all|your)\s+(previous|instructions|above)/gi,
+  /you\s+are\s+now\s+.{0,50}(dan|jailbroken|unrestricted)/gi,
+  /system\s*:\s*/gi,
+  /\[system\]/gi,
+  /<\|(im_start|im_end|system|user|assistant)\|>/gi,
+  /<s>|<\/s>/g,
+  /\bact\s+as\s+(if\s+you\s+are\s+)?(an?\s+)?(unrestricted|jailbroken|dan|evil|hacker)/gi,
+];
+
+export function sanitizePromptInput(text, maxLen = 2000) {
+  if (!text || typeof text !== 'string') return '';
+  let cleaned = text.slice(0, maxLen);
+  for (const pattern of INJECTION_PATTERNS) {
+    cleaned = cleaned.replace(pattern, '[filtré]');
+  }
+  // Retire les séquences de contrôle / caractères bizarres
+  cleaned = cleaned.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+  return cleaned.trim();
+}
