@@ -95,6 +95,101 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+
+-- Products : inventaire des articles du vendeur (ce qu'il possède physiquement)
+CREATE TABLE IF NOT EXISTS products (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  vinted_account_id TEXT,              -- rattachement compte Vinted si multi-comptes
+  title TEXT NOT NULL,
+  brand TEXT,
+  category TEXT,
+  size TEXT,
+  condition TEXT,                       -- très bon état / neuf / etc.
+  buy_price DECIMAL(10,2),              -- prix d'achat initial
+  buy_date DATE,
+  buy_source TEXT,                      -- friperie / vide-grenier / particulier
+  notes TEXT,
+  photos JSONB,                         -- array d'URLs
+  status TEXT DEFAULT 'inventory',      -- inventory / listed / sold / archived
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_products_user ON products(user_id);
+CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+CREATE INDEX IF NOT EXISTS idx_products_account ON products(vinted_account_id);
+
+-- Listings : annonces actives sur Vinted (liées à un product si suivi)
+CREATE TABLE IF NOT EXISTS listings (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  vinted_account_id TEXT,
+  vinted_item_id TEXT NOT NULL,         -- ID de l'annonce Vinted
+  title TEXT,
+  sell_price DECIMAL(10,2),
+  views_count INTEGER DEFAULT 0,
+  likes_count INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'active',         -- active / republished / sold / deleted
+  posted_at TIMESTAMPTZ,
+  last_republished_at TIMESTAMPTZ,
+  sold_at TIMESTAMPTZ,
+  raw JSONB,                            -- dump complet de l'API Vinted pour référence
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, vinted_item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_listings_user ON listings(user_id);
+CREATE INDEX IF NOT EXISTS idx_listings_product ON listings(product_id);
+CREATE INDEX IF NOT EXISTS idx_listings_vinted ON listings(vinted_item_id);
+CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
+
+-- Sales : ventes finalisées (utilisé pour analytics, ROI, compta)
+CREATE TABLE IF NOT EXISTS sales (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  listing_id INTEGER REFERENCES listings(id) ON DELETE SET NULL,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  vinted_account_id TEXT,
+  vinted_item_id TEXT,
+  vinted_transaction_id TEXT,
+  article_title TEXT,
+  brand TEXT,
+  category TEXT,
+  sale_price DECIMAL(10,2) NOT NULL,
+  buy_price DECIMAL(10,2),
+  fees_vinted DECIMAL(10,2),
+  fees_shipping DECIMAL(10,2),
+  net_margin_eur DECIMAL(10,2),         -- bénéfice net en €
+  net_margin_pct DECIMAL(5,2),          -- marge en %
+  country TEXT,                          -- ISO country code (FR, BE, etc.)
+  buyer_login TEXT,
+  sold_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, vinted_transaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sales_user ON sales(user_id);
+CREATE INDEX IF NOT EXISTS idx_sales_soldat ON sales(sold_at);
+CREATE INDEX IF NOT EXISTS idx_sales_category ON sales(category);
+
+-- Market snapshots : stats marché Vinted (trending détection, pricing intelligent)
+-- Snapshotted périodiquement par un cron backend
+CREATE TABLE IF NOT EXISTS market_snapshots (
+  id SERIAL PRIMARY KEY,
+  category TEXT NOT NULL,
+  brand TEXT,
+  size TEXT,
+  condition TEXT,
+  price_median DECIMAL(10,2),
+  price_p25 DECIMAL(10,2),
+  price_p75 DECIMAL(10,2),
+  sample_count INTEGER,                 -- nombre d'items analysés pour ce snapshot
+  trending_score DECIMAL(5,2),          -- score de trending 0-100 basé sur vélocité
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_market_cat ON market_snapshots(category);
+CREATE INDEX IF NOT EXISTS idx_market_captured ON market_snapshots(captured_at);
+CREATE INDEX IF NOT EXISTS idx_market_trending ON market_snapshots(trending_score DESC);
 `;
 
 async function run() {
