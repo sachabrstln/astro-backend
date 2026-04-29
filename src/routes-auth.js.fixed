@@ -242,8 +242,6 @@ export default async function authRoutes(app) {
         `UPDATE sessions SET revoked_at = NOW() WHERE jti = $1`,
         [req.user.jti]
       );
-      // v1.3.4 (#3) : invalide le cache sessions pour que la révocation soit effective immédiatement
-      try { app.sessionCache?.invalidate(req.user.jti); } catch (e) {}
     }
     await audit(req, 'logout', { user_id: req.user.sub });
     return { ok: true };
@@ -255,8 +253,6 @@ export default async function authRoutes(app) {
       `UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
       [req.user.sub]
     );
-    // v1.3.4 (#3) : purge tous les jti en cache pour ce user (immédiat)
-    try { app.sessionCache?.invalidateUser(req.user.sub); } catch (e) {}
     await audit(req, 'logout_all', { user_id: req.user.sub });
     return { ok: true };
   });
@@ -331,13 +327,11 @@ export default async function authRoutes(app) {
       [hash, reset.user_id]
     );
     await query(`UPDATE password_resets SET used_at = NOW() WHERE id = $1`, [reset.id]);
-    // Révoque toutes les sessions existantes par sécurité (forcée — anti-account-takeover)
+    // Révoque toutes les sessions existantes par sécurité
     await query(
       `UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
       [reset.user_id]
     );
-    // v1.3.4 (#3) : purge cache sessions pour ce user — invalidation immédiate
-    try { app.sessionCache?.invalidateUser(reset.user_id); } catch (e) {}
     await audit(req, 'password_reset_completed', { user_id: reset.user_id });
     return { ok: true, message: 'Mot de passe mis à jour. Connecte-toi avec ton nouveau mot de passe.' };
   });

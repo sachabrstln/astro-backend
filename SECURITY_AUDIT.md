@@ -95,7 +95,7 @@ Un user Max peut faire 200 appels Anthropic en 1 minute = coût élevé. Le quot
 - [ ] Monitoring : Sentry ou équivalent pour les erreurs
 - [ ] Backup DB automatique (Supabase le fait mais à vérifier config)
 - [ ] Variables d'env : `NODE_ENV=production`, `DATABASE_URL` avec SSL vérifié
-- [ ] Domaine `astro-vinted.com` configuré avec HTTPS (Vercel le fait auto)
+- [ ] Domaine `astropro.app` configuré avec HTTPS (Vercel le fait auto)
 - [ ] Landing : CSP + headers de sécurité (done via vercel.json)
 - [ ] CGU + Politique de confidentialité + Mentions légales (RGPD)
 - [ ] npm audit --production = 0 vulnérabilités critiques

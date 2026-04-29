@@ -5,7 +5,7 @@
 ### Obligatoires
 - [x] `PORT=8787`
 - [x] `NODE_ENV=production`
-- [x] `FRONTEND_URL=https://astro-vinted.com` (mettre le vrai domaine)
+- [x] `FRONTEND_URL=https://astropro.app` (mettre le vrai domaine)
 - [x] `DATABASE_URL=postgresql://...` (Supabase pooler)
 - [x] `JWT_SECRET=...` (min 32 chars, aléatoire)
 - [x] `ANTHROPIC_API_KEY=sk-ant-...`
@@ -19,7 +19,7 @@
 ### Recommandées
 - [ ] `CF_TURNSTILE_SECRET=0x4AAA...` (Cloudflare Turnstile)
 - [ ] `RESEND_API_KEY=re_...` (emails transactionnels)
-- [ ] `EMAIL_FROM=Astro <no-reply@astro-vinted.com>` (domaine vérifié chez Resend)
+- [ ] `EMAIL_FROM=Astro <no-reply@astropro.app>` (domaine vérifié chez Resend)
 - [ ] `DATABASE_SSL_STRICT=1` (vérification TLS stricte)
 
 ### Optionnelles
@@ -34,20 +34,20 @@ Dans `astro-landing/mentions-legales.html` :
 - [ ] Compléter raison sociale, SIREN, adresse
 
 Domaine :
-- [ ] Pointer DNS `astro-vinted.com` → Vercel
+- [ ] Pointer DNS `astropro.app` → Vercel
 - [ ] Vérifier HTTPS auto (Vercel le fait)
 
 ## 📧 Emails transactionnels (Resend)
 
 1. Créer compte sur [resend.com](https://resend.com)
-2. Vérifier le domaine `astro-vinted.com` (DNS TXT/MX records)
+2. Vérifier le domaine `astropro.app` (DNS TXT/MX records)
 3. Créer API key → mettre dans `RESEND_API_KEY`
 4. Sans cette config, le backend log les emails au lieu de les envoyer (dev mode)
 
 ## 🛡️ Cloudflare Turnstile
 
 1. [dash.cloudflare.com](https://dash.cloudflare.com) → Turnstile
-2. Ajouter un site : `astro-vinted.com`
+2. Ajouter un site : `astropro.app`
 3. Mode : "Managed" (invisible + challenge si suspect)
 4. Récupérer :
    - **Site key** (publique) → dans les HTML de la landing
@@ -121,7 +121,7 @@ app.setErrorHandler((err, req, reply) => {
 - [ ] Inscrire l'activité si CA > seuil auto-entrepreneur
 - [ ] Souscrire RC Pro (recommandé)
 - [ ] Mettre en place registre de traitement RGPD
-- [ ] Email DPO fonctionnel (privacy@astro-vinted.com)
+- [ ] Email DPO fonctionnel (privacy@astropro.app)
 
 ## 🚀 Déploiement
 

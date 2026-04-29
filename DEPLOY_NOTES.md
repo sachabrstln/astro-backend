@@ -57,7 +57,7 @@ curl https://astro-backend-xxx.onrender.com/health
 # Signup
 curl -X POST https://astro-backend-xxx.onrender.com/auth/signup \
   -H "Content-Type: application/json" \
-  -d '{"email":"test@astro-vinted.com","password":"MinDePasse1234"}'
+  -d '{"email":"test@astropro.app","password":"MinDePasse1234"}'
 # → { "token": "eyJ...", "user": { ... } }
 
 # Me

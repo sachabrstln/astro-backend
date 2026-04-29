@@ -9,9 +9,14 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   email_verified BOOLEAN NOT NULL DEFAULT FALSE,
   stripe_customer_id TEXT,
-  plan TEXT NOT NULL DEFAULT 'free',
+  stripe_subscription_id TEXT,
+  plan TEXT NOT NULL DEFAULT 'none',
   plan_status TEXT NOT NULL DEFAULT 'inactive',
   plan_expires_at TIMESTAMPTZ,
+  trial_ultra_until TIMESTAMPTZ,
+  trial_emails_sent JSONB DEFAULT '{}'::jsonb,
+  referral_code TEXT UNIQUE,
+  referred_by_code TEXT,
   failed_login_count INTEGER NOT NULL DEFAULT 0,
   locked_until TIMESTAMPTZ,
   password_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -23,6 +28,59 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAU
 ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_billing TEXT NOT NULL DEFAULT 'monthly';
+-- v1.3.2 : trial Ultra 7 jours + parrainage
+ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS cancel_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ultra_until TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_emails_sent JSONB DEFAULT '{}'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_code TEXT;
+CREATE INDEX IF NOT EXISTS idx_users_trial_ultra ON users(trial_ultra_until) WHERE trial_ultra_until IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code);
+
+-- Table referrals : parrainage v1.3.2
+CREATE TABLE IF NOT EXISTS referrals (
+  id SERIAL PRIMARY KEY,
+  referrer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  referee_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  referrer_code TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  referee_signup_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  referee_paid_at TIMESTAMPTZ,
+  parrain_ultra_days_credited INTEGER DEFAULT 0,
+  parrain_commission_active BOOLEAN DEFAULT FALSE,
+  parrain_commission_starts_at TIMESTAMPTZ,
+  parrain_commission_ends_at TIMESTAMPTZ,
+  parrain_commission_total_eur NUMERIC(10,2) DEFAULT 0,
+  filleul_trial_used BOOLEAN DEFAULT FALSE,
+  filleul_first_month_discount_pct INTEGER DEFAULT 20,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(referee_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_user_id);
+CREATE INDEX IF NOT EXISTS idx_referrals_status ON referrals(status);
+
+-- Table cancellation_feedback : analytics churn
+CREATE TABLE IF NOT EXISTS cancellation_feedback (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reason TEXT NOT NULL,
+  comment TEXT,
+  accepted_offer TEXT,
+  plan TEXT,
+  compte_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cancel_reason ON cancellation_feedback(reason);
+
+-- Table trial_events : tracking lifecycle trial
+CREATE TABLE IF NOT EXISTS trial_events (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  event TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE INDEX IF NOT EXISTS idx_users_stripe ON users(stripe_customer_id);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -55,10 +113,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_agent TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL,
-  revoked_at TIMESTAMPTZ
+  revoked_at TIMESTAMPTZ,
+  last_activity_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_jti ON sessions(jti);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+-- v1.3.4 (#3) : sessions actives uniquement (perf + cleanup)
+CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(jti) WHERE revoked_at IS NULL;
+-- Idempotent ALTER pour DBs déjà migrées
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
 
 -- Vérification email
 CREATE TABLE IF NOT EXISTS email_verifications (
@@ -189,14 +252,17 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_market_cat ON market_snapshots(category);
 CREATE INDEX IF NOT EXISTS idx_market_captured ON market_snapshots(captured_at);
-CREATE INDEX IF NOT EXISTS idx_market_trending ON market_snapshots(trending_score DESC);
 `;
 
-async function run() {
-  console.log('Running migrations...');
-  await pool.query(SQL);
-  console.log('✅ Tables créées / à jour');
-  await pool.end();
+async function migrate() {
+  try {
+    await pool.query(SQL);
+    console.log('✓ Migration terminée');
+    process.exit(0);
+  } catch (e) {
+    console.error('✗ Migration échouée:', e.message);
+    process.exit(1);
+  }
 }
 
-run().catch(e => { console.error(e); process.exit(1); });
+migrate();
