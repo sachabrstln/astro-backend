@@ -14,7 +14,19 @@ const realFetch = globalThis.fetch;
 function installFetchMock() {
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.startsWith('https://api.replicate.com/v1/models/') && u.endsWith('/predictions')) {
+    // v1.3.7 : mock GET /v1/models/{owner}/{name} pour fetch latest_version
+    // (le nouveau flow fait un GET model_info avant le POST predictions)
+    if (u.startsWith('https://api.replicate.com/v1/models/') && !u.endsWith('/predictions')) {
+      return new Response(JSON.stringify({
+        owner: '851-labs',
+        name: 'background-remover',
+        latest_version: { id: 'mock_version_hash_abc123' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    // v1.3.7 : POST /v1/predictions (avec version explicite) — remplace l'ancien
+    // POST /v1/models/{owner}/{name}/predictions qui retournait 404 sur 851-labs
+    if (u === 'https://api.replicate.com/v1/predictions' ||
+        (u.startsWith('https://api.replicate.com/v1/models/') && u.endsWith('/predictions'))) {
       if (mockReplicateBehavior === 'http-500') {
         return new Response('Internal error', { status: 500 });
       }

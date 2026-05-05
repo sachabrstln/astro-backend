@@ -36,7 +36,15 @@ const realFetch = globalThis.fetch;
 async function setupBackend() {
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.startsWith('https://api.replicate.com/v1/models/')) {
+    // v1.3.7 : nouveau flow 2-step. GET model_info → POST predictions avec version.
+    if (u.startsWith('https://api.replicate.com/v1/models/') && !u.endsWith('/predictions')) {
+      return new Response(JSON.stringify({
+        owner: '851-labs', name: 'background-remover',
+        latest_version: { id: 'mock_version_abc' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u === 'https://api.replicate.com/v1/predictions' ||
+        u.startsWith('https://api.replicate.com/v1/models/')) {
       return new Response(JSON.stringify({
         id: 'pred_x', status: 'succeeded',
         output: 'https://replicate.delivery/result.png',

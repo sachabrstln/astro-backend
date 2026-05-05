@@ -55,8 +55,40 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
   const dataUrl = `data:${mediaType || 'image/jpeg'};base64,${imageBase64}`;
   const startedAt = Date.now();
 
-  // Étape 1 : créer la prédiction (Prefer: wait=60s essaie de retourner sync)
-  const createUrl = `${REPLICATE_API_BASE}/models/${DEFAULT_MODEL}/predictions`;
+  // Étape 0 : récupérer la latest version du modèle. Le endpoint
+  // /v1/models/{owner}/{name}/predictions retourne 404 si le modèle
+  // n'a pas de "default version" publiée — c'est le cas pour 851-labs.
+  // On résout en faisant un GET /v1/models/{owner}/{name} → on récupère
+  // latest_version.id, puis POST /v1/predictions avec version explicite.
+  let latestVersion;
+  try {
+    const modelInfoRes = await fetch(`${REPLICATE_API_BASE}/models/${DEFAULT_MODEL}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!modelInfoRes.ok) {
+      const errText = await modelInfoRes.text().catch(() => '');
+      const err = new Error(`replicate_${modelInfoRes.status}`);
+      err.detail = 'model_info: ' + errText.slice(0, 200);
+      err.statusCode = modelInfoRes.status;
+      throw err;
+    }
+    const modelInfo = await modelInfoRes.json();
+    latestVersion = modelInfo.latest_version && modelInfo.latest_version.id;
+    if (!latestVersion) {
+      const err = new Error('replicate_no_version');
+      err.detail = 'model has no latest_version';
+      throw err;
+    }
+  } catch (e) {
+    if (e.message && e.message.startsWith('replicate_')) throw e;
+    const err = new Error('replicate_network');
+    err.detail = e.message;
+    throw err;
+  }
+
+  // Étape 1 : créer la prédiction avec version EXPLICITE.
+  // /v1/predictions accepte n'importe quel modèle public/privé via version.
+  const createUrl = `${REPLICATE_API_BASE}/predictions`;
   let createRes;
   try {
     createRes = await fetch(createUrl, {
@@ -66,7 +98,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
         'Content-Type': 'application/json',
         'Prefer': 'wait=60',
       },
-      body: JSON.stringify({ input: { image: dataUrl } }),
+      body: JSON.stringify({ version: latestVersion, input: { image: dataUrl } }),
     });
   } catch (e) {
     const err = new Error('replicate_network');
@@ -281,7 +313,7 @@ export default async function clipboardRoutes(app) {
       // mais PAS le detail complet (qui peut leak des infos internes Replicate).
       // Le code seul permet au client de savoir si c'est un probleme de credit, auth,
       // rate-limit, ou bug Replicate, sans risque de leak.
-      var safeCode = (e.message || 'unknown').match(/^[a-z_0-9]+/i);
+      const safeCode = (e.message || 'unknown').match(/^[a-z_0-9]+/i);
       return reply.code(502).send({
         error: 'erreur API détourage',
         code: safeCode ? safeCode[0] : 'unknown',
@@ -291,8 +323,6 @@ export default async function clipboardRoutes(app) {
   });
 
   // ─────── GET /api/ai/bg-swap/quota ─────────────────────────
-  // Renvoie l'usage courant pour afficher dans la modal "Copier"
-  // Réponse : { ok, plan, limit (null si infini), used, remaining }
   app.get('/api/ai/bg-swap/quota', {
     onRequest: [app.authenticate],
   }, async (req, reply) => {
@@ -304,7 +334,6 @@ export default async function clipboardRoutes(app) {
       [userId]
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
-
 
     const planDef = PLANS[user.plan] || {};
     const monthlyLimit = planDef.bgSwapMonthly || 0;
@@ -322,6 +351,9 @@ export default async function clipboardRoutes(app) {
       limit: limitOut,
       used,
       remaining: limitOut == null ? null : Math.max(0, limitOut - used),
+    };
+  });
+}
     };
   });
 }
