@@ -8,6 +8,7 @@ import rateLimit from '@fastify/rate-limit';
 import authRoutes from './routes-auth.js';
 import stripeRoutes from './routes-stripe.js';
 import aiRoutes from './routes-ai.js';
+import clipboardRoutes from './routes-clipboard.js';
 import referralRoutes from './routes-referral.js';
 import adminRoutes from './routes-admin.js';
 import { queryOne } from './db.js';
@@ -57,8 +58,8 @@ await app.register(cors, {
     if (origin.startsWith('chrome-extension://')) return cb(null, true);
     const allowed = [
       process.env.FRONTEND_URL,
-      'https://astropro.app',
-      'https://www.astropro.app',
+      'https://astrodash.app',
+      'https://www.astrodash.app',
       'http://localhost:3000',
       'http://localhost:5173',
     ].filter(Boolean);
@@ -229,6 +230,8 @@ app.get('/health', async () => ({
 await app.register(authRoutes);
 await app.register(stripeRoutes);
 await app.register(aiRoutes);
+// v1.3.6 : Clipboard (copier-coller multi-comptes Vinted)
+await app.register(clipboardRoutes);
 await app.register(referralRoutes);
 // v1.3.4 (#9) : routes admin (auth + email check)
 await app.register(adminRoutes);
@@ -237,6 +240,12 @@ await app.register(adminRoutes);
 const port = parseInt(process.env.PORT || '8787', 10);
 try {
   await app.listen({ host: '0.0.0.0', port });
+  console.log(`🚀 Astro backend running on :${port}`);
+} catch (err) {
+  app.log.error(err);
+  process.exit(1);
+}
+sten({ host: '0.0.0.0', port });
   console.log(`🚀 Astro backend running on :${port}`);
 } catch (err) {
   app.log.error(err);

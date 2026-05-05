@@ -25,6 +25,7 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_STARTER_ANNUAL',
     maxAccounts: 1,
     seoMonthly: 0,
+    bgSwapMonthly: 0, // Clipboard copier-coller multi-comptes : Ultra-only
     features: {
       republish: true, republishDaily: 10,
       messagesDaily: 20,
@@ -51,6 +52,7 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_PRO_ANNUAL',
     maxAccounts: 1,
     seoMonthly: 0,
+    bgSwapMonthly: 0, // Clipboard copier-coller multi-comptes : Ultra-only
     features: {
       republish: true, republishDaily: 25,    // 25 republications/jour (limité)
       messagesDaily: 250,                     // 250 relances favoris/jour
@@ -99,6 +101,9 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_ULTRA_ANNUAL',
     maxAccounts: 10,             // multi-comptes Ultra-only
     seoMonthly: Infinity,
+    // Clipboard : copier-coller multi-comptes avec détourage IA des photos.
+    // 150 swaps/mois = ~30 annonces × 5 photos. Au-delà → upsell pay-as-you-go.
+    bgSwapMonthly: 150,
     popular: true,               // badge "Recommandé" déplacé sur Ultra
     socialProof: '4 vendeurs sur 5 le choisissent',
     features: {
@@ -190,6 +195,19 @@ export function planToPriceId(plan, billing) {
   const envKey = (billing === 'annual') ? p.priceEnvAnnual : p.priceEnvMonthly;
   if (!envKey) return null;
   return process.env[envKey] || null;
+}
+
+/**
+ * Retourne le prix affichable (nombre) pour un (plan, billing) donne.
+ */
+export function planDisplayPrice(plan, billing) {
+  if (billing == null) billing = 'monthly';
+  const p = PLANS[plan];
+  if (!p) return 0;
+  if (billing === 'annual' && p.priceAnnualMonthly != null) return p.priceAnnualMonthly;
+  return p.price;
+}
+|| null;
 }
 
 /**

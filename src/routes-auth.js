@@ -17,7 +17,7 @@ const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION_MIN = 30;
 const RESET_EXPIRES_MIN = 60;
 const VERIFY_EXPIRES_H = 48;
-const FRONTEND = (process.env.FRONTEND_URL || 'https://astropro.app').replace(/\/$/, '');
+const FRONTEND = (process.env.FRONTEND_URL || 'https://astrodash.app').replace(/\/$/, '');
 
 function validateEmail(email) {
   if (typeof email !== 'string') return 'email requis';

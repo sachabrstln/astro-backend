@@ -43,8 +43,8 @@ export default async function stripeRoutes(app) {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       allow_promotion_codes: true,
-      success_url: (process.env.FRONTEND_URL || 'https://astropro.app') + '/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: (process.env.FRONTEND_URL || 'https://astropro.app') + '/pricing',
+      success_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/pricing',
       // v1.3.2 : empreinte CB obligatoire (refuse les checkouts sans payment method)
       payment_method_collection: 'always',
       subscription_data: {
@@ -87,8 +87,8 @@ export default async function stripeRoutes(app) {
       customer: customerId,
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: (process.env.FRONTEND_URL || 'https://astropro.app') + '/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: (process.env.FRONTEND_URL || 'https://astropro.app') + '/signup',
+      success_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/success?session_id={CHECKOUT_SESSION_ID}',
+      cancel_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/signup',
       // CB obligatoire (sinon Stripe refuse le subscription)
       payment_method_collection: 'always',
       subscription_data: {
@@ -112,7 +112,7 @@ export default async function stripeRoutes(app) {
     if (!user?.stripe_customer_id) return reply.code(400).send({ error: 'aucun abonnement Stripe' });
     const portal = await stripe.billingPortal.sessions.create({
       customer: user.stripe_customer_id,
-      return_url: (process.env.FRONTEND_URL || 'https://astropro.app') + '/dashboard'
+      return_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/dashboard'
     });
     return { url: portal.url };
   });
