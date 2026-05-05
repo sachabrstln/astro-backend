@@ -277,8 +277,14 @@ export default async function clipboardRoutes(app) {
       if (e.code === 'config') {
         return reply.code(503).send({ error: 'service indisponible (config)' });
       }
+      // Expose le code d'erreur (replicate_402, replicate_401, replicate_failed, etc.)
+      // mais PAS le detail complet (qui peut leak des infos internes Replicate).
+      // Le code seul permet au client de savoir si c'est un probleme de credit, auth,
+      // rate-limit, ou bug Replicate, sans risque de leak.
+      var safeCode = (e.message || 'unknown').match(/^[a-z_0-9]+/i);
       return reply.code(502).send({
         error: 'erreur API détourage',
+        code: safeCode ? safeCode[0] : 'unknown',
         detail: IS_PROD ? undefined : (e.detail || e.message),
       });
     }
@@ -298,6 +304,7 @@ export default async function clipboardRoutes(app) {
       [userId]
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
+
 
     const planDef = PLANS[user.plan] || {};
     const monthlyLimit = planDef.bgSwapMonthly || 0;

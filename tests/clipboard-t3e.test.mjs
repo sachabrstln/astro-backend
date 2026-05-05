@@ -69,14 +69,24 @@ test('_createDraftVinted POST avec wrapper {draft:{}} (verifie en live)', () => 
   assert.match(body, /JSON\.stringify\(\{\s*draft:\s*\{\}\s*\}\)/);
 });
 
-test('_publishOneAnnonce envoie color1_id+color2_id (pas color_ids array)', () => {
-  const startIdx = clip.indexOf('async function _publishOneAnnonce');
-  const endIdx = clip.indexOf('async function _runColerOp', startIdx);
+test('_publishOneAnnonce + _buildDraftBody utilisent color_ids array + catalog_id', () => {
+  const startIdx = clip.indexOf('function _buildDraftBody');
+  const endIdx = clip.indexOf('// Publie une annonce via le pattern Vinted', startIdx);
   const body = clip.slice(startIdx, endIdx);
-  assert.match(body, /color1_id/);
-  assert.match(body, /color2_id/);
-  // Et utilise catalog_id (pas category_id) au PATCH
-  assert.match(body, /patch\.catalog_id/);
+  // Vinted attend color_ids (array, max 2) dans le draft body — pas color1/color2
+  assert.match(body, /color_ids/);
+  // Utilise catalog_id (pas category_id) cote Vinted
+  assert.match(body, /catalog_id/);
+  // Les champs critiques du draft body
+  assert.match(body, /title:/);
+  assert.match(body, /description:/);
+  assert.match(body, /brand_id:/);
+  assert.match(body, /size_id:/);
+  assert.match(body, /status_id:/);
+  assert.match(body, /package_size_id:/);
+  assert.match(body, /assigned_photos:/);
+  assert.match(body, /temp_uuid:/);
+  assert.match(body, /upload_session_id:/);
 });
 
 test('_fetchAnnonceFullData lit color1_id+color2_id depuis Vinted', () => {
@@ -97,23 +107,23 @@ test('_submitCompletionVinted POST /completion', () => {
   assert.match(body, /method:\s*'POST'/);
 });
 
-test('_publishOneAnnonce orchestre upload N photos + draft + patch + completion', () => {
+test('_publishOneAnnonce double-pass upload + POST drafts + POST completion (pattern Bleam)', () => {
   const startIdx = clip.indexOf('async function _publishOneAnnonce');
   const endIdx = clip.indexOf('async function _runColerOp', startIdx);
   const body = clip.slice(startIdx, endIdx);
-  assert.match(body, /getPhotoBlobForUpload/);
-  assert.match(body, /_uploadPhotoToVinted/);
-  assert.match(body, /_createDraftVinted/);
-  assert.match(body, /_patchDraftVinted/);
-  assert.match(body, /_submitCompletionVinted/);
+  // Use 2 UUIDs distincts pour les 2 passes d'upload
+  assert.match(body, /tempUUID_A/);
+  assert.match(body, /tempUUID_B/);
+  assert.match(body, /_genUUIDv4/);
+  // Use _buildDraftBody helper
+  assert.match(body, /_buildDraftBody/);
+  // POST /drafts (creation + completion via meme endpoint mais en 2 etapes)
+  assert.match(body, /\/api\/v2\/item_upload\/drafts/);
+  assert.match(body, /\/completion/);
   // Pause humaine entre photos (0.8-2s)
   assert.match(body, /sleep\(800/);
-  // Patch contient les bons champs
-  assert.match(body, /assigned_photos/);
-  assert.match(body, /brand_id/);
-  assert.match(body, /size_id/);
-  assert.match(body, /category_id/);
-  assert.match(body, /package_size_id/);
+  // Pattern push_up false sur completion
+  assert.match(body, /push_up\s*=\s*false/);
 });
 
 test('_runColerOp itere sur annoncesOverride avec pause humaine 3-7s', () => {
@@ -178,6 +188,15 @@ test('contrat T3e : op shape complet', () => {
   const startIdx = ui.indexOf('async function _onColerPublish');
   const endIdx = ui.indexOf('function _autoInstall', startIdx);
   const body = ui.slice(startIdx, endIdx);
+  assert.match(body, /openProgress/);
+  assert.match(body, /MODIF_NAVIGATE_WORKER/);
+  assert.match(body, /astro_worker=1/);
+});
+
+test('contrat T3e : op shape complet', () => {
+  const startIdx = ui.indexOf('async function _onColerPublish');
+  const endIdx = ui.indexOf('function _autoInstall', startIdx);
+  const body = ui.slice(startIdx, endIdx);
   assert.match(body, /type:\s*'coller'/);
   assert.match(body, /stage:\s*'queued'/);
   assert.match(body, /lotId:\s*lot\.id/);
@@ -186,4 +205,29 @@ test('contrat T3e : op shape complet', () => {
   assert.match(clip, /op\.annoncesOverride/);
   assert.match(clip, /op\.bgConfig/);
   assert.match(clip, /op\.lotId/);
+});
+
+test('T3f : cleanup auto du lot apres coller reussi', () => {
+  // _runColerOp doit appeler deleteLot si errorCount === 0
+  assert.match(clip, /errorCount === 0 && publishedCount > 0/);
+  assert.match(clip, /deleteLot\(op\.lotId\)/);
+});
+
+test('T3f : helpers fonds custom exposes (getCustomBgs, addCustomBg, deleteCustomBg, newBgId)', () => {
+  assert.match(clip, /getCustomBgs:\s*getCustomBgs/);
+  assert.match(clip, /addCustomBg:\s*addCustomBg/);
+  assert.match(clip, /deleteCustomBg:\s*deleteCustomBg/);
+  assert.match(clip, /newBgId:\s*newBgId/);
+  assert.match(clip, /BGS_KEY\s*=\s*'astro_clipboard_bgs'/);
+});
+
+test('T3f : modal Coller integre upload + grid custom', () => {
+  assert.match(ui, /coler-bg-upload/);
+  assert.match(ui, /coler-bg-file/);
+  assert.match(ui, /coler-bg-custom-grid/);
+  assert.match(ui, /_onCustomBgFileSelected/);
+  assert.match(ui, /_renderCustomBgs/);
+  assert.match(ui, /_selectCustomBg/);
+  // bgConfig type 'image' utilise quand fond custom selectionne
+  assert.match(ui, /type:\s*'image'/);
 });
