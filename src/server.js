@@ -245,9 +245,3 @@ try {
   app.log.error(err);
   process.exit(1);
 }
-sten({ host: '0.0.0.0', port });
-  console.log(`🚀 Astro backend running on :${port}`);
-} catch (err) {
-  app.log.error(err);
-  process.exit(1);
-}

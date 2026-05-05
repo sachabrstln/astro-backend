@@ -207,16 +207,3 @@ export function planDisplayPrice(plan, billing) {
   if (billing === 'annual' && p.priceAnnualMonthly != null) return p.priceAnnualMonthly;
   return p.price;
 }
-|| null;
-}
-
-/**
- * Retourne le prix affichable (nombre) pour un (plan, billing) donne.
- */
-export function planDisplayPrice(plan, billing) {
-  if (billing == null) billing = 'monthly';
-  const p = PLANS[plan];
-  if (!p) return 0;
-  if (billing === 'annual' && p.priceAnnualMonthly != null) return p.priceAnnualMonthly;
-  return p.price;
-}
