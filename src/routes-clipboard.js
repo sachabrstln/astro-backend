@@ -354,6 +354,3 @@ export default async function clipboardRoutes(app) {
     };
   });
 }
-    };
-  });
-}
