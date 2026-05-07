@@ -226,13 +226,23 @@ export default async function clipboardRoutes(app) {
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
 
-    // v1.3.7 : strategie quota = packs d'abord, abo ensuite.
-    //  - Si l'user a des credits packs valides → on consomme 1 credit pack (FIFO)
-    //  - Sinon si abo Ultra actif → on consomme 1 du quota mensuel
-    //  - Sinon → 402/403 avec hint vers achat pack
+    // v1.3.7 : Multipost IA = upsell pour users abonnés. Pas d'accès sans
+    // abonnement actif, même avec un pack en stock (les packs sont un
+    // complément, pas un substitut d'abo).
     const planDef = PLANS[user.plan] || {};
     const monthlyLimit = planDef.bgSwapMonthly || 0;
-    const subActive = user.plan_status === 'active' || user.plan_status === 'trialing';
+    const subActive = user.plan_status === 'active'
+                   || user.plan_status === 'trialing'
+                   || user.plan_status === 'active_cancelling';
+
+    if (!subActive) {
+      return reply.code(402).send({
+        error: 'abonnement actif requis',
+        plan: user.plan,
+        plan_status: user.plan_status,
+        hint: 'Choisis un plan dans ton dashboard pour accéder à Multipost IA',
+      });
+    }
 
     // Récupère le pack le plus vieux non-expiré (FIFO consommation)
     const packRow = await queryOne(
@@ -387,6 +397,19 @@ export default async function clipboardRoutes(app) {
       [user.id]
     );
     const packCredits = packRow?.total || 0;
+
+    return {
+      ok: true,
+      plan: user.plan,
+      plan_status: user.plan_status,
+      limit: limitOut,
+      used,
+      remaining: limitOut == null ? null : Math.max(0, limitOut - used),
+      packCredits,
+    };
+  });
+}
+ packCredits = packRow?.total || 0;
 
     return {
       ok: true,

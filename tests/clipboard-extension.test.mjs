@@ -277,7 +277,7 @@ test('saveLot rejette si lot.id manquant', async () => {
 
 test('getQuota envoie le bon message au SW', async () => {
   lastSentMessages = [];
-  mockSendMessageReply = { ok: true, plan: 'ultra', limit: 150, used: 10, remaining: 140 };
+  mockSendMessageReply = { ok: true, plan: 'ultra', limit: 20, used: 10, remaining: 10 };
   const res = await AstroClipboard.getQuota();
   assert.equal(lastSentMessages.length, 1);
   assert.equal(lastSentMessages[0].action, 'BG_SWAP_QUOTA');

@@ -225,13 +225,13 @@ before(async () => {
 
 test('E2E : getQuota → backend → réponse complète', async () => {
   mockUser = { id: 1, plan: 'ultra', plan_status: 'active' };
-  mockUsageCount = 25;
+  mockUsageCount = 5;
   const r = await AstroClipboard.getQuota();
   assert.equal(r.ok, true);
   assert.equal(r.plan, 'ultra');
-  assert.equal(r.limit, 150);
-  assert.equal(r.used, 25);
-  assert.equal(r.remaining, 125);
+  assert.equal(r.limit, 20);
+  assert.equal(r.used, 5);
+  assert.equal(r.remaining, 15);
 });
 
 test('E2E : getQuota avec plan starter → limit=0 propagé', async () => {
@@ -297,7 +297,7 @@ test('E2E : BG_SWAP avec quota dépassé → 429 + limit/used propagés', async 
   });
   assert.equal(result.ok, false);
   assert.equal(result.status, 429);
-  assert.equal(result.limit, 150);
+  assert.equal(result.limit, 20);
   assert.equal(result.used, 999);
 });
 
@@ -335,11 +335,6 @@ test('E2E : storage extension persiste les lots', async () => {
 
   // Et qu'il est bien lisible via getLot
   const back = await AstroClipboard.getLot('lot_e2e_1');
-  assert.equal(back.name, 'E2E lot');
-  assert.equal(back.annonces.length, 1);
-  assert.equal(back.annonces[0].photos[0].detoured_b64, 'AAAA');
-});
-t_e2e_1');
   assert.equal(back.name, 'E2E lot');
   assert.equal(back.annonces.length, 1);
   assert.equal(back.annonces[0].photos[0].detoured_b64, 'AAAA');

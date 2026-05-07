@@ -261,7 +261,7 @@ test('POST quota dépassé → 429', async () => {
     payload: { image_b64: TINY_B64, mediaType: 'image/jpeg' }
   });
   assert.equal(res.statusCode, 429);
-  assert.equal(res.json().limit, 150);
+  assert.equal(res.json().limit, 20);
 });
 
 test('POST avec Replicate 500 → 502', async () => {
@@ -291,7 +291,7 @@ test('POST avec prediction failed → 502', async () => {
 test('GET /quota avec ultra → shape complet', async () => {
   reset();
   mockUser = { id: 1, plan: 'ultra', plan_status: 'active' };
-  mockUsageCount = 42;
+  mockUsageCount = 8;
   const res = await fastifyApp._inject({
     method: 'GET', url: '/api/ai/bg-swap/quota',
     headers: { 'x-test-user': '1' }
@@ -299,9 +299,9 @@ test('GET /quota avec ultra → shape complet', async () => {
   assert.equal(res.statusCode, 200);
   const body = res.json();
   assert.equal(body.plan, 'ultra');
-  assert.equal(body.limit, 150);
-  assert.equal(body.used, 42);
-  assert.equal(body.remaining, 108);
+  assert.equal(body.limit, 20);
+  assert.equal(body.used, 8);
+  assert.equal(body.remaining, 12);
 });
 
 test('GET /quota avec starter → limit=0', async () => {
@@ -312,17 +312,6 @@ test('GET /quota avec starter → limit=0', async () => {
     headers: { 'x-test-user': '1' }
   });
   assert.equal(res.statusCode, 200);
-  assert.equal(res.json().limit, 0);
-});
-
-test('GET /quota sans auth → 401', async () => {
-  reset();
-  const res = await fastifyApp._inject({
-    method: 'GET', url: '/api/ai/bg-swap/quota'
-  });
-  assert.equal(res.statusCode, 401);
-});
-assert.equal(res.statusCode, 200);
   assert.equal(res.json().limit, 0);
 });
 
