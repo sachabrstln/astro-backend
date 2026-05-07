@@ -409,16 +409,3 @@ export default async function clipboardRoutes(app) {
     };
   });
 }
- packCredits = packRow?.total || 0;
-
-    return {
-      ok: true,
-      plan: user.plan,
-      plan_status: user.plan_status,
-      limit: limitOut,
-      used,
-      remaining: limitOut == null ? null : Math.max(0, limitOut - used),
-      packCredits,
-    };
-  });
-}
