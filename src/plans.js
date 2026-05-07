@@ -41,8 +41,11 @@ export const PLANS = {
     }
   },
 
-  // TIER 2 : Astro Pro — decoy moyen (volontairement frustrant pour pousser vers Ultra)
-  // v1.3.1 : pas d'IA, pas de Compta URSSAF, pas de Profits & ROI, pas de multi-comptes
+  // TIER 2 : Astro Pro — vendeur régulier, sérieux, multi-comptes léger
+  // v1.3.7 : repositionné — 3 comptes, relances illimitées, articles dormants,
+  // score vendeur, assistant SEO. Reste Ultra-only : Profits&ROI, Compta URSSAF,
+  // Pricing Intel, Articles Gagnants, Bundle, Négo IA, Réponses auto IA,
+  // multi-compte 10, Multipost IA inclus.
   pro: {
     name: 'Astro Pro',
     price: 35,
@@ -50,26 +53,29 @@ export const PLANS = {
     priceAnnualTotal: 378,
     priceEnvMonthly: 'STRIPE_PRICE_PRO_MONTHLY',
     priceEnvAnnual:  'STRIPE_PRICE_PRO_ANNUAL',
-    maxAccounts: 1,
-    seoMonthly: 0,
-    bgSwapMonthly: 0, // Clipboard copier-coller multi-comptes : Ultra-only
+    maxAccounts: 3,                         // v1.3.7 : 1 → 3 comptes
+    seoMonthly: 50,                         // v1.3.7 : SEO IA inclus (vs 0)
+    bgSwapMonthly: 0,                       // Multipost IA : à la carte uniquement
     features: {
-      republish: true, republishDaily: 25,    // 25 republications/jour (limité)
-      messagesDaily: 250,                     // 250 relances favoris/jour
+      republish: true, republishDaily: 25,
+      messagesDaily: Infinity,              // v1.3.7 : illimité (vs 250)
       bordereaux: true,
       sync: true,
-      simulator: false,        // ✗ pas de simulateur ROI
-      roi: false,              // ✗ pas de Profits & ROI
-      compta: false,           // ✗ pas de Compta URSSAF
-      analyticsLevel: 'simple',// analyse simple uniquement (pas de granularité)
-      modif: true,             // modification en masse OK
-      bundle: false,           // ✗ pas de bundle intelligent (Ultra)
-      pricingIntel: false,     // ✗ Ultra
-      sellerScore: false,      // ✗ Ultra
-      winners: false,          // ✗ Ultra
-      dormant: false,          // ✗ Ultra
-      granularity: false,      // ✗ Ultra
-      seo: false, nego: false, repauto: false
+      simulator: false,                     // Ultra-only (Profits&ROI séparé)
+      roi: false,                           // Ultra-only
+      compta: false,                        // Ultra-only (Compta URSSAF)
+      analyticsLevel: 'simple',             // Granularité = Ultra-only
+      modif: true,
+      bundle: false,                        // Ultra-only
+      pricingIntel: false,                  // Ultra-only
+      sellerScore: true,                    // v1.3.7 : ouvert au Pro
+      winners: false,                       // Ultra-only
+      dormant: true,                        // v1.3.7 : ouvert au Pro
+      granularity: false,                   // Ultra-only
+      seo: true, seoDaily: 50,              // v1.3.7 : Assistant SEO titre+desc (50/j)
+      nego: false,                          // Ultra-only
+      repauto: false,                       // Ultra-only
+      iaModel: 'haiku'                      // Pro = Haiku (Ultra = Sonnet)
     }
   },
 

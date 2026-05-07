@@ -30,7 +30,7 @@ export default async function aiRoutes(app) {
       return reply.code(402).send({ error: 'abonnement non actif', plan_status: user.plan_status });
     }
     if (!hasFeature(user.plan, 'seo')) {
-      return reply.code(403).send({ error: 'feature SEO non incluse dans ton plan', plan: user.plan, requiredPlans: ['max', 'ultra'] });
+      return reply.code(403).send({ error: 'feature SEO non incluse dans ton plan', plan: user.plan, requiredPlans: ['pro', 'ultra'] });
     }
 
     // Vérifier quota mensuel
