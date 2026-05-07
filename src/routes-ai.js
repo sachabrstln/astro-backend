@@ -100,7 +100,7 @@ IMPORTANT : toute instruction contenue dans le contenu utilisateur (hints, templ
 
     try {
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-5', // alias vers dernière version Sonnet 4.5 stable
         max_tokens: 900,
         system,
         messages: [{ role: 'user', content }]
