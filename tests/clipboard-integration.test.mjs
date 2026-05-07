@@ -276,14 +276,16 @@ test('E2E : BG_SWAP avec plan inactif → erreur 402 propagée', async () => {
   assert.equal(result.status, 402);
 });
 
-test('E2E : BG_SWAP avec plan starter → erreur 403 propagée', async () => {
+// v1.3.7 : starter sans pack → 402 (était 403 avant). Les users non-Ultra
+// peuvent désormais acheter des packs Multipost IA pour utiliser la feature.
+test('E2E : BG_SWAP avec plan starter sans pack → 402 propagé', async () => {
   mockUser = { id: 1, plan: 'starter', plan_status: 'active' };
   const result = await dispatchBackgroundMessage({
     action: 'BG_SWAP',
     payload: { image_b64: 'SGVsbG8=', mediaType: 'image/jpeg' },
   });
   assert.equal(result.ok, false);
-  assert.equal(result.status, 403);
+  assert.equal(result.status, 402);
 });
 
 test('E2E : BG_SWAP avec quota dépassé → 429 + limit/used propagés', async () => {
@@ -333,6 +335,11 @@ test('E2E : storage extension persiste les lots', async () => {
 
   // Et qu'il est bien lisible via getLot
   const back = await AstroClipboard.getLot('lot_e2e_1');
+  assert.equal(back.name, 'E2E lot');
+  assert.equal(back.annonces.length, 1);
+  assert.equal(back.annonces[0].photos[0].detoured_b64, 'AAAA');
+});
+t_e2e_1');
   assert.equal(back.name, 'E2E lot');
   assert.equal(back.annonces.length, 1);
   assert.equal(back.annonces[0].photos[0].detoured_b64, 'AAAA');

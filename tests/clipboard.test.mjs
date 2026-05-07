@@ -181,7 +181,10 @@ test('POST avec auth + plan inactif → 402', async () => {
   assert.equal(res.statusCode, 402);
 });
 
-test('POST avec plan starter → 403', async () => {
+// v1.3.7 : starter/pro sans pack → 402 (pas 403) car ils PEUVENT acheter
+// un pack Multipost IA. Le 403 historique ("feature not in plan") n'a plus
+// de sens : tout le monde peut utiliser la feature s'il a des crédits packs.
+test('POST avec plan starter sans pack → 402 (suggère achat pack)', async () => {
   reset();
   mockUser = { id: 1, plan: 'starter', plan_status: 'active' };
   const res = await fastifyApp._inject({
@@ -189,11 +192,11 @@ test('POST avec plan starter → 403', async () => {
     headers: { 'x-test-user': '1' },
     payload: { image_b64: TINY_B64, mediaType: 'image/jpeg' }
   });
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.json().requiredPlan, 'ultra');
+  assert.equal(res.statusCode, 402);
+  assert.match(res.json().error, /aucun crédit/i);
 });
 
-test('POST avec plan pro → 403', async () => {
+test('POST avec plan pro sans pack → 402', async () => {
   reset();
   mockUser = { id: 1, plan: 'pro', plan_status: 'active' };
   const res = await fastifyApp._inject({
@@ -201,7 +204,7 @@ test('POST avec plan pro → 403', async () => {
     headers: { 'x-test-user': '1' },
     payload: { image_b64: TINY_B64, mediaType: 'image/jpeg' }
   });
-  assert.equal(res.statusCode, 403);
+  assert.equal(res.statusCode, 402);
 });
 
 test('POST sans image_b64 → 400', async () => {
@@ -309,6 +312,17 @@ test('GET /quota avec starter → limit=0', async () => {
     headers: { 'x-test-user': '1' }
   });
   assert.equal(res.statusCode, 200);
+  assert.equal(res.json().limit, 0);
+});
+
+test('GET /quota sans auth → 401', async () => {
+  reset();
+  const res = await fastifyApp._inject({
+    method: 'GET', url: '/api/ai/bg-swap/quota'
+  });
+  assert.equal(res.statusCode, 401);
+});
+assert.equal(res.statusCode, 200);
   assert.equal(res.json().limit, 0);
 });
 

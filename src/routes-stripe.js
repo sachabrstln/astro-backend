@@ -106,6 +106,75 @@ export default async function stripeRoutes(app) {
     return { url: session.url, billing };
   });
 
+  // ── POST /api/stripe/pack/checkout — achat d'un pack Multipost IA (v1.3.7)
+  // Body : { pack: 'multipost-10' | 'multipost-25' | 'multipost-75' }
+  // Crée une Stripe Checkout Session en mode 'payment' (one-time, pas subscription).
+  // Le webhook checkout.session.completed grant les crédits dans pack_credits.
+  app.post('/api/stripe/pack/checkout', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { pack } = req.body || {};
+    const PACK_MAP = {
+      'multipost-10': { priceId: process.env.STRIPE_PACK_PRICE_10, size: 10 },
+      'multipost-25': { priceId: process.env.STRIPE_PACK_PRICE_25, size: 25 },
+      'multipost-75': { priceId: process.env.STRIPE_PACK_PRICE_75, size: 75 },
+    };
+    const def = PACK_MAP[pack];
+    if (!def) return reply.code(400).send({ error: 'pack invalide' });
+    if (!def.priceId) {
+      return reply.code(500).send({ error: 'STRIPE_PACK_PRICE_' + def.size + ' non configuré sur Render' });
+    }
+
+    const user = await queryOne('SELECT id, email, stripe_customer_id FROM users WHERE id = $1', [req.user.sub]);
+    if (!user) return reply.code(404).send({ error: 'user introuvable' });
+
+    // Crée le Stripe customer si pas déjà fait (pour relier le paiement à l'user)
+    let customerId = user.stripe_customer_id;
+    if (!customerId) {
+      const c = await stripe.customers.create({
+        email: user.email,
+        metadata: { user_id: String(user.id) }
+      });
+      customerId = c.id;
+      await query('UPDATE users SET stripe_customer_id = $1, updated_at = NOW() WHERE id = $2', [customerId, user.id]);
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: 'payment', // one-time purchase, pas subscription
+      line_items: [{ price: def.priceId, quantity: 1 }],
+      allow_promotion_codes: true,
+      success_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/dashboard?pack_purchased=' + pack,
+      cancel_url: (process.env.FRONTEND_URL || 'https://astrodash.app') + '/dashboard#abonnement',
+      // Metadata propagé au webhook pour grant les crédits
+      payment_intent_data: {
+        metadata: { user_id: String(user.id), pack, pack_size: String(def.size) }
+      },
+      metadata: { user_id: String(user.id), pack, pack_size: String(def.size), feature: 'multipost' }
+    });
+    return { url: session.url, pack, size: def.size };
+  });
+
+  // ── GET /api/pack/balance — solde de crédits Multipost IA restants
+  // Utilisé par le dashboard et l'extension pour afficher le nombre de copies.
+  app.get('/api/pack/balance', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const userId = req.user.sub;
+    const rows = await query(
+      `SELECT COALESCE(SUM(remaining), 0)::int AS total
+       FROM pack_credits
+       WHERE user_id = $1 AND expires_at > NOW() AND remaining > 0`,
+      [userId]
+    );
+    const total = rows?.[0]?.total || 0;
+    // Détail des packs actifs (pour transparence dans le dashboard)
+    const detail = await query(
+      `SELECT id, pack_size, remaining, granted_at, expires_at
+       FROM pack_credits
+       WHERE user_id = $1 AND expires_at > NOW() AND remaining > 0
+       ORDER BY expires_at ASC`,
+      [userId]
+    );
+    return { ok: true, total, packs: detail || [] };
+  });
+
   // POST /stripe/portal — lien vers le portail client Stripe (gestion abo)
   app.post('/stripe/portal', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = await queryOne('SELECT stripe_customer_id FROM users WHERE id = $1', [req.user.sub]);
@@ -143,9 +212,48 @@ export default async function stripeRoutes(app) {
   });
 }
 
+// v1.3.7 : grant des crédits Multipost IA après un achat one-time (pack).
+// Idempotent grâce à UNIQUE constraint sur stripe_session_id.
+async function grantPackCredits(session) {
+  const userId = parseInt(session.metadata?.user_id || '0', 10);
+  const pack = session.metadata?.pack;
+  const packSize = parseInt(session.metadata?.pack_size || '0', 10);
+  if (!userId || !pack || !packSize) {
+    console.warn('[Pack] checkout.session.completed sans metadata pack', session.id);
+    return;
+  }
+  // Récupère le price_id depuis line_items (pas dans session.metadata par défaut)
+  let priceId = null;
+  try {
+    const items = await stripe.checkout.sessions.listLineItems(session.id, { limit: 1 });
+    priceId = items?.data?.[0]?.price?.id || null;
+  } catch (e) {
+    console.warn('[Pack] listLineItems failed', e.message);
+  }
+  const amountPaidCents = session.amount_total || 0;
+  const expiresAt = new Date();
+  expiresAt.setMonth(expiresAt.getMonth() + 12); // 12 mois validité
+
+  // INSERT idempotent : ON CONFLICT DO NOTHING grâce a UNIQUE(stripe_session_id)
+  await query(
+    `INSERT INTO pack_credits (user_id, stripe_session_id, stripe_price_id, pack_size, remaining, amount_paid_cents, expires_at)
+     VALUES ($1, $2, $3, $4, $4, $5, $6)
+     ON CONFLICT (stripe_session_id) DO NOTHING`,
+    [userId, session.id, priceId || 'unknown', packSize, amountPaidCents, expiresAt]
+  );
+}
+
 async function handleStripeEvent(event) {
   const obj = event.data.object;
   switch (event.type) {
+    case 'checkout.session.completed': {
+      // v1.3.7 : pack Multipost IA (mode 'payment'). Les abos sont gérés
+      // via customer.subscription.created/updated, donc on filtre.
+      if (obj.mode === 'payment' && obj.metadata?.feature === 'multipost') {
+        await grantPackCredits(obj);
+      }
+      break;
+    }
     case 'customer.subscription.created':
     case 'customer.subscription.updated': {
       const userId = parseInt(obj.metadata?.user_id || '0', 10);

@@ -219,40 +219,57 @@ export default async function clipboardRoutes(app) {
     const userId = req.user?.sub;
     if (!userId) return reply.code(401).send({ error: 'auth requis' });
 
-    // 1. Vérif user + abonnement actif
+    // 1. Vérif user
     const user = await queryOne(
       'SELECT id, plan, plan_status FROM users WHERE id = $1',
       [userId]
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
-    if (user.plan_status !== 'active' && user.plan_status !== 'trialing') {
-      return reply.code(402).send({
-        error: 'abonnement non actif',
-        plan_status: user.plan_status,
-      });
-    }
 
-    // 2. Vérif que le plan inclut la feature
+    // v1.3.7 : strategie quota = packs d'abord, abo ensuite.
+    //  - Si l'user a des credits packs valides → on consomme 1 credit pack (FIFO)
+    //  - Sinon si abo Ultra actif → on consomme 1 du quota mensuel
+    //  - Sinon → 402/403 avec hint vers achat pack
     const planDef = PLANS[user.plan] || {};
     const monthlyLimit = planDef.bgSwapMonthly || 0;
-    if (monthlyLimit <= 0) {
-      return reply.code(403).send({
-        error: 'feature non incluse dans ton plan',
-        plan: user.plan,
-        requiredPlan: 'ultra',
-      });
-    }
+    const subActive = user.plan_status === 'active' || user.plan_status === 'trialing';
 
-    // 3. Vérif quota mensuel (sauf si Infinity)
-    if (monthlyLimit !== Infinity) {
-      const used = await getMonthlyUsage(user.id);
-      if (used >= monthlyLimit) {
-        return reply.code(429).send({
-          error: 'quota mensuel atteint',
-          used,
-          limit: monthlyLimit,
-        });
+    // Récupère le pack le plus vieux non-expiré (FIFO consommation)
+    const packRow = await queryOne(
+      `SELECT id, remaining FROM pack_credits
+       WHERE user_id = $1 AND expires_at > NOW() AND remaining > 0
+       ORDER BY expires_at ASC LIMIT 1`,
+      [user.id]
+    );
+
+    let consumeFrom = null; // 'pack' | 'subscription'
+    let packIdToDebit = null;
+
+    if (packRow) {
+      consumeFrom = 'pack';
+      packIdToDebit = packRow.id;
+    } else if (subActive && monthlyLimit > 0) {
+      // Pas de pack → fallback sur quota mensuel (Ultra)
+      if (monthlyLimit !== Infinity) {
+        const used = await getMonthlyUsage(user.id);
+        if (used >= monthlyLimit) {
+          return reply.code(429).send({
+            error: 'quota mensuel atteint',
+            used,
+            limit: monthlyLimit,
+            hint: 'Achète un pack Multipost IA pour continuer ce mois-ci',
+          });
+        }
       }
+      consumeFrom = 'subscription';
+    } else {
+      // Ni pack ni abo Ultra actif → bloque + suggère achat pack
+      return reply.code(402).send({
+        error: 'aucun crédit Multipost IA disponible',
+        plan: user.plan,
+        plan_status: user.plan_status,
+        hint: 'Achète un pack Multipost IA dans ton dashboard ou passe à Ultra',
+      });
     }
 
     // 4. Validation body
@@ -275,7 +292,9 @@ export default async function clipboardRoutes(app) {
     try {
       const result = await removeBackgroundReplicate(image_b64, mediaType, app.log);
 
-      // 6. Track usage (cost_usd réel uniquement utile pour l'admin dashboard)
+      // 6. Track usage : double bookkeeping
+      //    - ai_usage : compteur global (cost_usd pour admin dashboard)
+      //    - pack_credit_usage + decrement remaining (si on consomme un pack)
       try {
         await query(
           `INSERT INTO ai_usage (user_id, kind, tokens_input, tokens_output, cost_usd)
@@ -284,6 +303,26 @@ export default async function clipboardRoutes(app) {
         );
       } catch (e) {
         app.log.warn({ err: e }, 'ai_usage insert failed (non-fatal)');
+      }
+      if (consumeFrom === 'pack' && packIdToDebit) {
+        try {
+          // Decrement atomique (pas de race : remaining > 0 garanti par WHERE)
+          const upd = await queryOne(
+            `UPDATE pack_credits SET remaining = remaining - 1
+             WHERE id = $1 AND remaining > 0
+             RETURNING id, remaining`,
+            [packIdToDebit]
+          );
+          if (upd) {
+            await query(
+              `INSERT INTO pack_credit_usage (user_id, pack_credit_id, feature)
+               VALUES ($1, $2, 'bg-swap')`,
+              [user.id, upd.id]
+            );
+          }
+        } catch (e) {
+          app.log.warn({ err: e }, 'pack_credit decrement failed (non-fatal)');
+        }
       }
 
       return {
@@ -309,10 +348,6 @@ export default async function clipboardRoutes(app) {
       if (e.code === 'config') {
         return reply.code(503).send({ error: 'service indisponible (config)' });
       }
-      // Expose le code d'erreur (replicate_402, replicate_401, replicate_failed, etc.)
-      // mais PAS le detail complet (qui peut leak des infos internes Replicate).
-      // Le code seul permet au client de savoir si c'est un probleme de credit, auth,
-      // rate-limit, ou bug Replicate, sans risque de leak.
       const safeCode = (e.message || 'unknown').match(/^[a-z_0-9]+/i);
       return reply.code(502).send({
         error: 'erreur API détourage',
@@ -344,6 +379,15 @@ export default async function clipboardRoutes(app) {
       used = await getMonthlyUsage(user.id);
     }
 
+    // v1.3.7 : expose le solde de packs Multipost IA pour la modal Copier
+    const packRow = await queryOne(
+      `SELECT COALESCE(SUM(remaining), 0)::int AS total
+       FROM pack_credits
+       WHERE user_id = $1 AND expires_at > NOW() AND remaining > 0`,
+      [user.id]
+    );
+    const packCredits = packRow?.total || 0;
+
     return {
       ok: true,
       plan: user.plan,
@@ -351,6 +395,7 @@ export default async function clipboardRoutes(app) {
       limit: limitOut,
       used,
       remaining: limitOut == null ? null : Math.max(0, limitOut - used),
+      packCredits,
     };
   });
 }
