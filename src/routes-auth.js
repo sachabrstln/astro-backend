@@ -227,11 +227,17 @@ export default async function authRoutes(app) {
   app.get('/auth/me', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = await queryOne(
       `SELECT id, email, plan, plan_billing, plan_status, plan_expires_at,
-              email_verified, stripe_customer_id, created_at
+              email_verified, stripe_customer_id, created_at,
+              trial_ultra_until, cancel_at, stripe_subscription_id
        FROM users WHERE id = $1`,
       [req.user.sub]
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
+    // v1.3.7 : alias UI-friendly pour la page Mon abonnement
+    user.startedAt = user.created_at;
+    user.currentPeriodEnd = user.plan_expires_at;
+    user.cancelAtPeriodEnd = user.plan_status === 'active_cancelling' || !!user.cancel_at;
+    user.billingCycle = user.plan_billing;
     return { user };
   });
 

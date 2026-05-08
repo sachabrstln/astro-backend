@@ -6,7 +6,7 @@
 //   → 20% de réduction sur le 1er mois payant
 //
 // Parrain (à chaque filleul converti) :
-//   → 15 jours Ultra crédités sur son abo (cumulables)
+//   → 3 jours Ultra crédités sur son abo (cumulables) — v1.3.7 (avant : 15j)
 //   → 30% de commission cash sur les paiements du filleul pendant 4 mois
 //   → Auto-stop dès que le filleul résilie
 // ──────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ export async function activateReferralOnFirstPayment(refereeUserId) {
     `UPDATE referrals SET
        status = 'active',
        referee_paid_at = $1,
-       parrain_ultra_days_credited = 15,
+       parrain_ultra_days_credited = 3,
        parrain_commission_active = TRUE,
        parrain_commission_starts_at = $1,
        parrain_commission_ends_at = $2
@@ -79,10 +79,10 @@ export async function activateReferralOnFirstPayment(refereeUserId) {
     [now, commissionEnd, ref.id]
   );
 
-  // Crédite 15 jours Ultra au parrain (extend trial_ultra_until OU plan_period_end)
+  // Crédite 3 jours Ultra au parrain (v1.3.7 : avant 15j, ramené pour préserver la marge)
   await query(
     `UPDATE users
-     SET trial_ultra_until = COALESCE(trial_ultra_until, NOW()) + INTERVAL '15 days'
+     SET trial_ultra_until = COALESCE(trial_ultra_until, NOW()) + INTERVAL '3 days'
      WHERE id = $1`,
     [ref.referrer_user_id]
   );

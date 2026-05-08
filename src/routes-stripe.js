@@ -1,7 +1,13 @@
 // Routes : /stripe/checkout, /stripe/portal, /stripe/webhook
 import Stripe from 'stripe';
+import crypto from 'crypto';
 import { query, queryOne } from './db.js';
 import { PLANS, ACTIVE_PLAN_KEYS, BILLING_CYCLES, planToPriceId, priceIdToPlan } from './plans.js';
+
+// Helper : SHA-256 d'un email (anti-PII dans la table trial_history)
+function sha256(s) { return crypto.createHash('sha256').update(String(s).toLowerCase().trim()).digest('hex'); }
+// Helper : extrait l'IP du request (gère le proxy Render)
+function reqIp(req) { return ((req.headers['x-forwarded-for'] || req.ip || '') + '').split(',')[0].trim(); }
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -62,11 +68,34 @@ export default async function stripeRoutes(app) {
     const user = await queryOne('SELECT id, email, stripe_customer_id, plan, plan_status FROM users WHERE id = $1', [req.user.sub]);
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
 
-    // Anti-double-trial : un user qui a déjà eu trial_ultra_until ne peut pas en redemander
+    // Anti-double-trial sur le user lui-même
     const prev = await queryOne('SELECT trial_ultra_until FROM users WHERE id = $1', [user.id]);
     if (prev?.trial_ultra_until) {
       return reply.code(400).send({ error: 'trial déjà utilisé' });
     }
+
+    // v1.3.7 : Anti-fraude trial — un user qui a déjà eu un trial sous une autre identité
+    // (email/IP/carte) ne peut pas en re-demander un.
+    const emailHash = sha256(user.email);
+    const ip = reqIp(req);
+    const fraudCheck = await queryOne(
+      `SELECT id FROM trial_history
+       WHERE email_hash = $1 OR (ip_address = $2 AND created_at > NOW() - INTERVAL '30 days')
+       LIMIT 1`,
+      [emailHash, ip]
+    );
+    if (fraudCheck) {
+      // Log la tentative pour analyse
+      await query(
+        `INSERT INTO trial_history (user_id, email_hash, ip_address, outcome)
+         VALUES ($1, $2, $3, 'fraud_blocked')`,
+        [user.id, emailHash, ip]
+      );
+      app.log.warn({ userId: user.id, email: user.email, ip }, 'trial fraud blocked');
+      return reply.code(403).send({ error: 'Une période d\'essai a déjà été utilisée pour cette adresse ou ce navigateur. Souscris directement à un plan.' });
+    }
+    // Note : la card_fingerprint sera capturée au webhook payment_method.attached
+    // (on ne peut pas la connaître avant le checkout). Le check se fait alors.
 
     // Récupère le price Stripe pour Ultra dans la facturation choisie
     const priceId = process.env[billing === 'annual' ? 'STRIPE_PRICE_ULTRA_ANNUAL' : 'STRIPE_PRICE_ULTRA_MONTHLY'];
@@ -186,6 +215,44 @@ export default async function stripeRoutes(app) {
     return { url: portal.url };
   });
 
+  // ──────────────────────────────────────────────────────────
+  // v1.3.7 — Endpoints résiliation / réactivation / retention
+  // ──────────────────────────────────────────────────────────
+
+  // POST /api/stripe/cancel-subscription — résilier (cancel_at_period_end)
+  app.post('/api/stripe/cancel-subscription', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = await queryOne('SELECT id, stripe_subscription_id FROM users WHERE id = $1', [req.user.sub]);
+    if (!user?.stripe_subscription_id) {
+      return reply.code(400).send({ error: 'aucun abonnement actif' });
+    }
+    try {
+      await stripe.subscriptions.update(user.stripe_subscription_id, { cancel_at_period_end: true });
+      await query(`UPDATE users SET plan_status = 'active_cancelling' WHERE id = $1`, [user.id]);
+      app.log.info({ userId: user.id, subId: user.stripe_subscription_id }, 'subscription cancelled (period end)');
+      return { ok: true };
+    } catch (e) {
+      app.log.error('Cancel subscription failed: ' + e.message);
+      return reply.code(500).send({ error: 'cancel failed', detail: e.message });
+    }
+  });
+
+  // POST /api/stripe/reactivate-subscription — annule la résiliation programmée
+  app.post('/api/stripe/reactivate-subscription', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = await queryOne('SELECT id, stripe_subscription_id FROM users WHERE id = $1', [req.user.sub]);
+    if (!user?.stripe_subscription_id) {
+      return reply.code(400).send({ error: 'aucun abonnement à réactiver' });
+    }
+    try {
+      await stripe.subscriptions.update(user.stripe_subscription_id, { cancel_at_period_end: false });
+      await query(`UPDATE users SET plan_status = 'active' WHERE id = $1`, [user.id]);
+      app.log.info({ userId: user.id }, 'subscription reactivated');
+      return { ok: true };
+    } catch (e) {
+      app.log.error('Reactivate failed: ' + e.message);
+      return reply.code(500).send({ error: 'reactivate failed', detail: e.message });
+    }
+  });
+
   // POST /stripe/webhook — traité RAW par Stripe signature
   app.post('/stripe/webhook', { config: { rawBody: true } }, async (req, reply) => {
     const sig = req.headers['stripe-signature'];
@@ -302,6 +369,38 @@ async function handleStripeEvent(event) {
         const ref = await import('./routes-referral.js');
         if (ref.stopReferralOnCancellation) await ref.stopReferralOnCancellation(userId);
       } catch (e) {}
+      break;
+    }
+    case 'payment_method.attached': {
+      // v1.3.7 : capture le card.fingerprint pour anti-fraude trial
+      try {
+        const customerId = obj.customer;
+        if (!customerId) break;
+        const fp = obj.card?.fingerprint;
+        if (!fp) break;
+        // Find user by stripe_customer_id
+        const u = await queryOne('SELECT id, email FROM users WHERE stripe_customer_id = $1', [customerId]);
+        if (!u) break;
+        // Update user
+        await query(`UPDATE users SET card_fingerprint = $1 WHERE id = $2`, [fp, u.id]);
+        // Insert dans trial_history (si pas déjà là pour ce user)
+        await query(
+          `INSERT INTO trial_history (user_id, email_hash, card_fingerprint, ip_address)
+           SELECT $1, $2, $3, signup_ip FROM users WHERE id = $1
+             AND NOT EXISTS (SELECT 1 FROM trial_history WHERE user_id = $1 AND card_fingerprint = $3)`,
+          [u.id, sha256(u.email || ''), fp]
+        );
+        // Si la carte a déjà été utilisée par un AUTRE user, c'est suspect
+        const otherUsage = await queryOne(
+          `SELECT user_id FROM trial_history WHERE card_fingerprint = $1 AND user_id != $2 LIMIT 1`,
+          [fp, u.id]
+        );
+        if (otherUsage) {
+          console.warn(`[FRAUD] Card ${fp.slice(0, 8)} déjà utilisée par user ${otherUsage.user_id}, maintenant ${u.id}`);
+        }
+      } catch (e) {
+        console.error('[payment_method.attached] error', e.message);
+      }
       break;
     }
     case 'invoice.paid': {

@@ -11,6 +11,7 @@ import aiRoutes from './routes-ai.js';
 import clipboardRoutes from './routes-clipboard.js';
 import referralRoutes from './routes-referral.js';
 import adminRoutes from './routes-admin.js';
+import supportRoutes from './routes-support.js';
 import { queryOne } from './db.js';
 
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -159,6 +160,18 @@ app.decorate('authenticate', async (req, reply) => {
     sessionCache.invalidate(jti);
     return reply.code(401).send({ error: 'session révoquée' });
   }
+  // v1.3.7 : refus paiement = no access (sauf routes Stripe pour payer)
+  // On laisse passer /stripe/portal et /api/stripe/cancel-subscription pour gestion
+  if (req.url && !req.url.startsWith('/stripe/') && !req.url.startsWith('/api/stripe/') && !req.url.startsWith('/auth/')) {
+    const u = await queryOne('SELECT plan_status FROM users WHERE id = $1', [userId]);
+    if (u && u.plan_status === 'past_due') {
+      return reply.code(402).send({
+        error: 'paiement_requis',
+        reason: 'past_due',
+        message: 'Ton dernier paiement a échoué. Va dans Support → Mon abonnement → Factures pour mettre à jour ta carte.'
+      });
+    }
+  }
   if (new Date(session.expires_at) < new Date()) {
     sessionCache.invalidate(jti);
     return reply.code(401).send({ error: 'session expirée' });
@@ -235,6 +248,7 @@ await app.register(clipboardRoutes);
 await app.register(referralRoutes);
 // v1.3.4 (#9) : routes admin (auth + email check)
 await app.register(adminRoutes);
+await app.register(supportRoutes);
 
 // Start
 const port = parseInt(process.env.PORT || '8787', 10);
