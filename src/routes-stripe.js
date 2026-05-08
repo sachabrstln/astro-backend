@@ -60,13 +60,29 @@ export default async function stripeRoutes(app) {
     return { url: session.url, plan, billing };
   });
 
-  // POST /stripe/start-trial — flow signup : 7 jours gratuits Ultra avec CB obligatoire.
-  // Au J+7 si l'user n'a pas annulé via /stripe/portal, Stripe charge automatiquement
-  // le 1er mois d'Ultra (selon le billing choisi). Aucun service avant cette étape.
+  // POST /stripe/start-trial — v1.3.8 : flow signup unifié.
+  // L'user choisit son target_plan (starter|pro|ultra) + billing (monthly|annual).
+  // On crée la subscription sur le price ULTRA avec trial 7j → tous les users testent
+  // les fonctionnalités Ultra pendant 7 jours, peu importe le plan choisi.
+  // À J-3 du fin de trial (webhook trial_will_end), on swap le price Stripe vers
+  // le target_plan choisi. À J+7, Stripe charge le 1er paiement du plan target.
+  // Si referred_by_code est défini, on applique aussi le coupon -15% sur la 1ère facture.
   app.post('/stripe/start-trial', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const { billing = 'monthly' } = req.body || {};
-    const user = await queryOne('SELECT id, email, stripe_customer_id, plan, plan_status FROM users WHERE id = $1', [req.user.sub]);
+    const billing = (req.body?.billing === 'annual') ? 'annual' : 'monthly';
+    const targetPlan = ['starter', 'pro', 'ultra'].includes(req.body?.targetPlan)
+      ? req.body.targetPlan
+      : 'ultra'; // fallback : si pas spécifié, on assume Ultra (ancien comportement)
+    const user = await queryOne(
+      'SELECT id, email, stripe_customer_id, plan, plan_status FROM users WHERE id = $1',
+      [req.user.sub]
+    );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
+
+    // Stocke le target_plan / target_billing pour le webhook trial_will_end
+    await query(
+      `UPDATE users SET target_plan = $1, target_billing = $2 WHERE id = $3`,
+      [targetPlan, billing, user.id]
+    );
 
     // Anti-double-trial sur le user lui-même
     const prev = await queryOne('SELECT trial_ultra_until FROM users WHERE id = $1', [user.id]);
@@ -121,18 +137,25 @@ export default async function stripeRoutes(app) {
       // CB obligatoire (sinon Stripe refuse le subscription)
       payment_method_collection: 'always',
       subscription_data: {
-        // 7 jours d'essai → charge automatique au J+7
+        // 7 jours d'essai → charge automatique au J+7 sur le target_plan
         trial_period_days: 7,
-        // Si l'user n'a pas de payment method valide à J+7, Stripe annule le subscription
-        // au lieu de laisser sans payer. Politique "no pay = no service".
+        // Stripe émet customer.subscription.trial_will_end 3 jours avant la fin du trial
+        // → le webhook swap le price vers target_plan + applique coupon -15% si filleul
         trial_settings: {
           end_behavior: { missing_payment_method: 'cancel' }
         },
-        metadata: { user_id: String(user.id), plan: 'ultra', billing, trial: 'true' }
+        metadata: {
+          user_id: String(user.id),
+          plan: 'ultra',          // plan ACTIF pendant le trial (toujours Ultra)
+          billing,                // billing du target (monthly|annual)
+          target_plan: targetPlan, // plan qui s'activera au J+7
+          target_billing: billing,
+          trial: 'true',
+        }
       }
     });
 
-    return { url: session.url, billing };
+    return { url: session.url, billing, targetPlan };
   });
 
   // ── POST /api/stripe/pack/checkout — achat d'un pack Multipost IA (v1.3.7)
@@ -442,11 +465,21 @@ async function handleStripeEvent(event) {
           `UPDATE users SET plan_status = 'active' WHERE id = $1 AND plan_status IN ('trialing', 'past_due')`,
           [userId]
         );
-        // Active la commission parrain si user est filleul
+        // v1.3.8 : commission parrain — active au 1er paiement, crédite à chaque paiement (4 mois max)
         try {
           const ref = await import('./routes-referral.js');
-          if (ref.activateReferralOnFirstPayment) await ref.activateReferralOnFirstPayment(userId);
-        } catch (e) {}
+          if (obj.billing_reason === 'subscription_create') {
+            // 1er paiement après trial → active la commission
+            if (ref.activateReferralOnFirstPayment) await ref.activateReferralOnFirstPayment(userId);
+          }
+          // Crédite la commission parrain (mois 1, 2, 3, 4 du filleul)
+          if (ref.creditCommissionForPayment) {
+            const amountPaidCents = obj.amount_paid || 0;
+            await ref.creditCommissionForPayment(userId, amountPaidCents);
+          }
+        } catch (e) {
+          console.error('[invoice.paid commission]', e.message);
+        }
       }
       break;
     }
@@ -457,5 +490,82 @@ async function handleStripeEvent(event) {
       }
       break;
     }
+    // v1.3.8 — Stripe Connect Express : track quand le parrain a fini son onboarding KYC
+    case 'account.updated': {
+      try {
+        const acc = obj; // l'objet est un Account (Connect)
+        const accountId = acc.id;
+        if (!accountId) break;
+        // L'onboarding est complet quand : details_submitted + charges_enabled + payouts_enabled
+        const complete = !!(acc.details_submitted && acc.payouts_enabled);
+        const u = await queryOne(
+          `SELECT id FROM users WHERE stripe_connect_account_id = $1`,
+          [accountId]
+        );
+        if (!u) break;
+        await query(
+          `UPDATE users SET connect_onboarding_complete = $1 WHERE id = $2`,
+          [complete, u.id]
+        );
+      } catch (e) {
+        console.error('[account.updated]', e.message);
+      }
+      break;
+    }
+    // v1.3.8 — Trial Ultra-pour-tous : à J-3 de la fin du trial, swap le price
+    // de la subscription vers le target_plan choisi par l'user au signup.
+    case 'customer.subscription.trial_will_end': {
+      try {
+        const userId = parseInt(obj.metadata?.user_id || '0', 10);
+        if (!userId) break;
+        const u = await queryOne(
+          `SELECT id, target_plan, target_billing, referred_by_code FROM users WHERE id = $1`,
+          [userId]
+        );
+        if (!u) break;
+        const targetPlan = u.target_plan || 'starter'; // fallback raisonnable
+        const targetBilling = u.target_billing || 'monthly';
+        const targetPriceId = priceIdForPlan(targetPlan, targetBilling);
+        if (!targetPriceId) {
+          console.warn(`[trial_will_end] no price for ${targetPlan}/${targetBilling} (user ${userId})`);
+          break;
+        }
+        // Récupère l'item courant de la subscription
+        const sub = await stripe.subscriptions.retrieve(obj.id);
+        const currentItem = sub.items.data[0];
+        if (!currentItem) break;
+        // Si déjà sur le bon price, rien à faire
+        if (currentItem.price.id === targetPriceId) break;
+        // Swap le price (sans proration, prend effet à la fin du trial)
+        const updateParams = {
+          items: [{ id: currentItem.id, price: targetPriceId }],
+          proration_behavior: 'none',
+        };
+        // Applique le coupon -15% sur la 1ère facture si filleul
+        if (u.referred_by_code) {
+          // On utilise un coupon Stripe pré-créé "ASTRO_REFERRAL_15"
+          // (à créer manuellement dans Stripe Dashboard → Products → Coupons)
+          updateParams.discounts = [{ coupon: 'ASTRO_REFERRAL_15' }];
+        }
+        await stripe.subscriptions.update(obj.id, updateParams);
+        console.log(`[trial_will_end] swapped user ${userId} to ${targetPlan}/${targetBilling}`);
+      } catch (e) {
+        console.error('[trial_will_end] swap failed', e.message);
+      }
+      break;
+    }
   }
+}
+
+// v1.3.8 — Helper inverse de priceIdToPlan : plan + billing → price_id
+function priceIdForPlan(plan, billing) {
+  const PRICES = {
+    'starter:monthly':  process.env.STRIPE_PRICE_STARTER_MONTHLY,
+    'starter:annual':   process.env.STRIPE_PRICE_STARTER_ANNUAL,
+    'pro:monthly':      process.env.STRIPE_PRICE_PRO_MONTHLY,
+    'pro:annual':       process.env.STRIPE_PRICE_PRO_ANNUAL,
+    'ultra:monthly':    process.env.STRIPE_PRICE_ULTRA_MONTHLY,
+    'ultra:annual':     process.env.STRIPE_PRICE_ULTRA_ANNUAL,
+  };
+  return PRICES[`${plan}:${billing}`] || null;
 }

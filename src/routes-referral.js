@@ -1,62 +1,53 @@
 // ──────────────────────────────────────────────────────────────
-// Programme de parrainage Astro v1.3.1
+// Programme parrainage v2 (v1.3.8) — Stripe Connect Express
 //
-// Filleul (qui s'inscrit avec un code) :
-//   → 7 jours d'essai Ultra gratuits (déjà inclus dans signup standard)
-//   → 20% de réduction sur le 1er mois payant
+// Filleul (signup avec code) :
+//   → Réduction -15% sur le 1er mois payant après les 7 jours d'essai
 //
-// Parrain (à chaque filleul converti) :
-//   → 3 jours Ultra crédités sur son abo (cumulables) — v1.3.7 (avant : 15j)
+// Parrain :
+//   → Choisit son propre code (4-12 caractères alphanumériques, IMMUTABLE)
 //   → 30% de commission cash sur les paiements du filleul pendant 4 mois
-//   → Auto-stop dès que le filleul résilie
+//   → Cagnotte cumulée payable via Stripe Connect Express (KYC + virement IBAN auto)
+//   → Auto-stop si filleul résilie ou demande remboursement
 // ──────────────────────────────────────────────────────────────
 
 import { query, queryOne } from './db.js';
+import Stripe from 'stripe';
+import { audit } from './security.js';
 
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-12-18.acacia' })
+  : null;
 
-// Génère un code parrainage court et lisible (8 chars alphanumériques)
-function generateReferralCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
+// Config
+const CODE_RE = /^[A-Z0-9]{4,12}$/;
+const COMMISSION_PCT = 30;     // 30% du montant net Stripe
+const COMMISSION_MONTHS = 4;   // 4 premiers mois du filleul
+const FILLEUL_DISCOUNT_PCT = 15; // -15% sur le 1er mois payant
+const MIN_PAYOUT_CENTS = 1000; // 10€ minimum pour retrait
 
-export async function ensureUserHasReferralCode(userId) {
-  const u = await queryOne(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
-  if (u && u.referral_code) return u.referral_code;
-  // Génère un code unique (max 5 essais en cas de collision)
-  for (let i = 0; i < 5; i++) {
-    const code = generateReferralCode();
-    try {
-      await query(`UPDATE users SET referral_code = $1 WHERE id = $2 AND referral_code IS NULL`, [code, userId]);
-      const check = await queryOne(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
-      if (check && check.referral_code === code) return code;
-    } catch (e) { /* collision UNIQUE → retry */ }
-  }
-  throw new Error('referral_code_generation_failed');
-}
-
-// Crée un lien filleul → parrain au signup (si referred_by_code fourni)
+// ── HELPERS ────────────────────────────────────────────────
+// Linke filleul ← parrain au signup (si referred_by_code fourni)
 export async function linkReferralAtSignup(refereeUserId, referrerCode) {
   if (!referrerCode) return null;
-  const referrer = await queryOne(`SELECT id FROM users WHERE referral_code = $1`, [referrerCode]);
+  const cleanCode = String(referrerCode).trim().toUpperCase();
+  if (!CODE_RE.test(cleanCode)) return null;
+
+  const referrer = await queryOne(`SELECT id FROM users WHERE referral_code = $1`, [cleanCode]);
   if (!referrer) return null; // code inconnu, ignore silencieusement
-  if (referrer.id === refereeUserId) return null; // anti-fraude : pas son propre code
+  if (String(referrer.id) === String(refereeUserId)) return null; // anti-self-referral
 
   await query(
     `INSERT INTO referrals (referrer_user_id, referee_user_id, referrer_code, status, filleul_first_month_discount_pct)
-     VALUES ($1, $2, $3, 'pending', 20)
+     VALUES ($1, $2, $3, 'pending', $4)
      ON CONFLICT (referee_user_id) DO NOTHING`,
-    [referrer.id, refereeUserId, referrerCode]
+    [referrer.id, refereeUserId, cleanCode, FILLEUL_DISCOUNT_PCT]
   );
-
-  // Marque l'user comme référé pour Stripe coupon
-  await query(`UPDATE users SET referred_by_code = $1 WHERE id = $2`, [referrerCode, refereeUserId]);
+  await query(`UPDATE users SET referred_by_code = $1 WHERE id = $2`, [cleanCode, refereeUserId]);
   return referrer.id;
 }
 
-// Active la récompense parrain dès que le filleul paie (Stripe webhook subscription.created)
+// Active la commission parrain au 1er paiement du filleul (après trial 7j Ultra)
 export async function activateReferralOnFirstPayment(refereeUserId) {
   const ref = await queryOne(
     `SELECT id, referrer_user_id, status FROM referrals WHERE referee_user_id = $1`,
@@ -65,47 +56,69 @@ export async function activateReferralOnFirstPayment(refereeUserId) {
   if (!ref || ref.status !== 'pending') return;
 
   const now = new Date();
-  const commissionEnd = new Date(now.getTime() + 4 * 30 * 24 * 3600 * 1000); // 4 mois
+  const commissionEnd = new Date(now.getTime() + COMMISSION_MONTHS * 30 * 24 * 3600 * 1000);
 
   await query(
     `UPDATE referrals SET
        status = 'active',
        referee_paid_at = $1,
-       parrain_ultra_days_credited = 3,
        parrain_commission_active = TRUE,
        parrain_commission_starts_at = $1,
        parrain_commission_ends_at = $2
      WHERE id = $3`,
     [now, commissionEnd, ref.id]
   );
-
-  // Crédite 3 jours Ultra au parrain (v1.3.7 : avant 15j, ramené pour préserver la marge)
-  await query(
-    `UPDATE users
-     SET trial_ultra_until = COALESCE(trial_ultra_until, NOW()) + INTERVAL '3 days'
-     WHERE id = $1`,
-    [ref.referrer_user_id]
-  );
 }
 
-// Auto-stop : appelé via Stripe webhook subscription.deleted
+// Calcule + crédite la commission au parrain pour un paiement filleul
+// Appelé depuis webhook invoice.paid (mois 1, 2, 3, 4 du filleul).
+export async function creditCommissionForPayment(refereeUserId, amountPaidCents) {
+  const ref = await queryOne(
+    `SELECT id, referrer_user_id, commission_paid_count, status
+     FROM referrals WHERE referee_user_id = $1 AND status = 'active'`,
+    [refereeUserId]
+  );
+  if (!ref) return null;
+  if (ref.commission_paid_count >= COMMISSION_MONTHS) return null; // déjà 4 mois payés
+
+  const commissionCents = Math.round(amountPaidCents * COMMISSION_PCT / 100);
+  // Update referral
+  await query(
+    `UPDATE referrals SET
+       commission_paid_count = commission_paid_count + 1,
+       parrain_commission_total_cents = parrain_commission_total_cents + $1,
+       parrain_commission_total_eur = (parrain_commission_total_cents + $1) / 100.0
+     WHERE id = $2`,
+    [commissionCents, ref.id]
+  );
+  // Crédit cagnotte parrain
+  await query(
+    `UPDATE users SET
+       cagnotte_balance_cents = cagnotte_balance_cents + $1,
+       cagnotte_lifetime_cents = cagnotte_lifetime_cents + $1
+     WHERE id = $2`,
+    [commissionCents, ref.referrer_user_id]
+  );
+  return { referrerUserId: ref.referrer_user_id, commissionCents };
+}
+
+// Auto-stop : appelé via webhook subscription.deleted (filleul résilie)
 export async function stopReferralOnCancellation(refereeUserId) {
   await query(
     `UPDATE referrals SET status = 'cancelled', parrain_commission_active = FALSE
-     WHERE referee_user_id = $1 AND status = 'active'`,
+     WHERE referee_user_id = $1 AND status IN ('active', 'pending')`,
     [refereeUserId]
   );
 }
 
-// Calcule la commission cumulée d'un parrain (pour affichage dashboard / payouts mensuels)
-export async function getReferrerStats(referrerUserId) {
+// Stats agrégées d'un parrain
+async function getReferrerStats(referrerUserId) {
   const stats = await queryOne(
     `SELECT
        COUNT(*) FILTER (WHERE status = 'active') AS active_filleuls,
        COUNT(*) FILTER (WHERE status = 'pending') AS pending_filleuls,
        COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_filleuls,
-       COALESCE(SUM(parrain_commission_total_eur), 0) AS total_commission_eur,
-       COALESCE(SUM(parrain_ultra_days_credited), 0) AS total_ultra_days_credited
+       COALESCE(SUM(parrain_commission_total_cents), 0) AS total_commission_cents
      FROM referrals
      WHERE referrer_user_id = $1`,
     [referrerUserId]
@@ -113,32 +126,106 @@ export async function getReferrerStats(referrerUserId) {
   return stats || {};
 }
 
-// Routes Fastify
+// ── ROUTES ─────────────────────────────────────────────────
 export default async function referralRoutes(app) {
-  // GET /referral/me — code + stats
+
+  // GET /referral/me — code + cagnotte + onboarding status + stats
   app.get('/referral/me', { onRequest: [app.authenticate] }, async (req, reply) => {
     const userId = req.user.sub;
-    const code = await ensureUserHasReferralCode(userId);
+    const u = await queryOne(
+      `SELECT referral_code, referral_code_chosen_at, cagnotte_balance_cents,
+              cagnotte_lifetime_cents, stripe_connect_account_id,
+              connect_onboarding_complete
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (!u) return reply.code(404).send({ error: 'user introuvable' });
+
     const stats = await getReferrerStats(userId);
     return {
-      code,
-      shareUrl: `https://astro-pro.app/?ref=${code}`,
+      code: u.referral_code || null,           // null si pas encore choisi
+      codeChosenAt: u.referral_code_chosen_at, // si défini, le code est immutable
+      shareUrl: u.referral_code ? `https://astro-pro.app/?ref=${u.referral_code}` : null,
+      cagnotte: {
+        balanceCents: u.cagnotte_balance_cents || 0,
+        balanceEur: (u.cagnotte_balance_cents || 0) / 100,
+        lifetimeCents: u.cagnotte_lifetime_cents || 0,
+        lifetimeEur: (u.cagnotte_lifetime_cents || 0) / 100,
+        minPayoutCents: MIN_PAYOUT_CENTS,
+        minPayoutEur: MIN_PAYOUT_CENTS / 100,
+      },
+      connect: {
+        accountId: u.stripe_connect_account_id || null,
+        onboardingComplete: !!u.connect_onboarding_complete,
+        canPayout: !!u.connect_onboarding_complete && (u.cagnotte_balance_cents || 0) >= MIN_PAYOUT_CENTS,
+      },
       stats: {
         active: parseInt(stats.active_filleuls || 0),
         pending: parseInt(stats.pending_filleuls || 0),
         cancelled: parseInt(stats.cancelled_filleuls || 0),
-        totalCommissionEur: parseFloat(stats.total_commission_eur || 0),
-        totalUltraDaysCredited: parseInt(stats.total_ultra_days_credited || 0)
-      }
+        totalCommissionCents: parseInt(stats.total_commission_cents || 0),
+        totalCommissionEur: parseInt(stats.total_commission_cents || 0) / 100,
+      },
+      config: {
+        commissionPct: COMMISSION_PCT,
+        commissionMonths: COMMISSION_MONTHS,
+        filleulDiscountPct: FILLEUL_DISCOUNT_PCT,
+      },
     };
   });
 
-  // GET /referral/list — liste détaillée des filleuls (pour le dashboard parrain)
+  // POST /referral/set-code — choisit son code (immutable une fois set)
+  app.post('/referral/set-code', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const userId = req.user.sub;
+    const code = String(req.body?.code || '').trim().toUpperCase();
+    if (!CODE_RE.test(code)) {
+      return reply.code(400).send({ error: 'code invalide (4 à 12 caractères, lettres majuscules ou chiffres)' });
+    }
+    // Mots interdits (pour pas qu'un user prenne ASTRO, ADMIN, etc.)
+    const RESERVED = ['ASTRO', 'ADMIN', 'STAFF', 'TEST', 'NULL', 'NONE', 'SUPPORT', 'ASTROPRO'];
+    if (RESERVED.includes(code)) {
+      return reply.code(400).send({ error: 'ce code est réservé, choisis-en un autre' });
+    }
+
+    // Check si l'user a déjà un code (immutable)
+    const me = await queryOne(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
+    if (me?.referral_code) {
+      return reply.code(409).send({ error: 'tu as déjà choisi ton code, il ne peut pas être modifié' });
+    }
+    // Check unicité globale
+    const taken = await queryOne(`SELECT id FROM users WHERE referral_code = $1`, [code]);
+    if (taken) {
+      return reply.code(409).send({ error: 'ce code est déjà pris, choisis-en un autre' });
+    }
+
+    try {
+      await query(
+        `UPDATE users SET referral_code = $1, referral_code_chosen_at = NOW() WHERE id = $2`,
+        [code, userId]
+      );
+      await audit(req, 'referral_code_set', { code });
+    } catch (e) {
+      // Race condition UNIQUE → quelqu'un d'autre l'a pris en même temps
+      return reply.code(409).send({ error: 'ce code vient d\'être pris, choisis-en un autre' });
+    }
+    return { ok: true, code, shareUrl: `https://astro-pro.app/?ref=${code}` };
+  });
+
+  // POST /referral/validate-code — vérifie qu'un code est valide (signup form)
+  app.post('/referral/validate-code', async (req, reply) => {
+    const code = String(req.body?.code || '').trim().toUpperCase();
+    if (!CODE_RE.test(code)) return { valid: false };
+    const referrer = await queryOne(`SELECT email FROM users WHERE referral_code = $1`, [code]);
+    return { valid: !!referrer };
+  });
+
+  // GET /referral/list — détail filleuls (anonymisé)
   app.get('/referral/list', { onRequest: [app.authenticate] }, async (req, reply) => {
     const userId = req.user.sub;
     const rows = await query(
       `SELECT r.id, r.status, r.referee_signup_at, r.referee_paid_at,
-              r.parrain_commission_total_eur, r.parrain_commission_ends_at,
+              r.parrain_commission_total_cents, r.commission_paid_count,
+              r.parrain_commission_ends_at,
               u.email AS filleul_email
        FROM referrals r
        LEFT JOIN users u ON u.id = r.referee_user_id
@@ -146,14 +233,147 @@ export default async function referralRoutes(app) {
        ORDER BY r.referee_signup_at DESC`,
       [userId]
     );
-    return { referrals: rows || [] };
+    // Anonymise email : s***@gmail.com
+    const anon = (rows || []).map(r => ({
+      ...r,
+      filleul_email: r.filleul_email
+        ? r.filleul_email[0] + '***@' + r.filleul_email.split('@')[1]
+        : null,
+      parrain_commission_total_eur: (r.parrain_commission_total_cents || 0) / 100,
+      months_remaining: Math.max(0, 4 - (r.commission_paid_count || 0)),
+    }));
+    return { referrals: anon };
   });
 
-  // POST /referral/validate-code — vérifie qu'un code est valide (pour le widget signup)
-  app.post('/referral/validate-code', async (req, reply) => {
-    const { code } = req.body || {};
-    if (!code) return reply.code(400).send({ error: 'code requis' });
-    const referrer = await queryOne(`SELECT email FROM users WHERE referral_code = $1`, [code]);
-    return { valid: !!referrer };
+  // POST /referral/connect/onboarding — crée le compte Stripe Connect Express
+  // et retourne une URL d'onboarding hostée par Stripe (KYC + IBAN).
+  app.post('/referral/connect/onboarding', { onRequest: [app.authenticate] }, async (req, reply) => {
+    if (!stripe) return reply.code(503).send({ error: 'stripe indisponible' });
+    const userId = req.user.sub;
+    const u = await queryOne(
+      `SELECT id, email, stripe_connect_account_id FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (!u) return reply.code(404).send({ error: 'user introuvable' });
+
+    let accountId = u.stripe_connect_account_id;
+    // Crée un compte Connect Express si pas déjà fait
+    if (!accountId) {
+      const acc = await stripe.accounts.create({
+        type: 'express',
+        country: 'FR',
+        email: u.email,
+        capabilities: {
+          transfers: { requested: true },
+        },
+        metadata: { astro_user_id: String(userId) },
+      });
+      accountId = acc.id;
+      await query(
+        `UPDATE users SET stripe_connect_account_id = $1 WHERE id = $2`,
+        [accountId, userId]
+      );
+      await audit(req, 'connect_account_created', { account_id: accountId });
+    }
+
+    // Génère un Account Link pour l'onboarding KYC + IBAN
+    const FRONTEND = (process.env.FRONTEND_URL || 'https://astro-pro.app').replace(/\/$/, '');
+    const link = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: `${FRONTEND}/parrainage?onboarding=refresh`,
+      return_url: `${FRONTEND}/parrainage?onboarding=done`,
+      type: 'account_onboarding',
+    });
+
+    return { ok: true, onboardingUrl: link.url, accountId };
+  });
+
+  // POST /referral/withdraw — déclenche un Stripe Transfer + Payout vers IBAN du parrain
+  app.post('/referral/withdraw', { onRequest: [app.authenticate] }, async (req, reply) => {
+    if (!stripe) return reply.code(503).send({ error: 'stripe indisponible' });
+    const userId = req.user.sub;
+    const u = await queryOne(
+      `SELECT id, email, stripe_connect_account_id, connect_onboarding_complete,
+              cagnotte_balance_cents
+       FROM users WHERE id = $1`,
+      [userId]
+    );
+    if (!u) return reply.code(404).send({ error: 'user introuvable' });
+    if (!u.stripe_connect_account_id) {
+      return reply.code(400).send({ error: 'configure d\'abord ton compte de paiement (Stripe Connect)' });
+    }
+    if (!u.connect_onboarding_complete) {
+      return reply.code(400).send({ error: 'finalise d\'abord ton onboarding Stripe Connect (KYC + IBAN)' });
+    }
+    const balance = u.cagnotte_balance_cents || 0;
+    if (balance < MIN_PAYOUT_CENTS) {
+      return reply.code(400).send({
+        error: `montant minimum pour un retrait : ${MIN_PAYOUT_CENTS / 100}€ (cagnotte actuelle : ${(balance / 100).toFixed(2)}€)`,
+      });
+    }
+
+    // Lock optimiste : on créé d'abord le payout en DB, puis on tente le transfer Stripe.
+    // Si Stripe échoue, on rollback.
+    const payoutRow = await queryOne(
+      `INSERT INTO payouts (user_id, amount_cents, status) VALUES ($1, $2, 'pending') RETURNING id`,
+      [userId, balance]
+    );
+
+    // Débite la cagnotte (à rollback si erreur)
+    await query(
+      `UPDATE users SET cagnotte_balance_cents = 0 WHERE id = $1`,
+      [userId]
+    );
+
+    try {
+      const transfer = await stripe.transfers.create({
+        amount: balance,
+        currency: 'eur',
+        destination: u.stripe_connect_account_id,
+        description: `Cagnotte parrainage Astro — user ${userId}`,
+        metadata: { astro_user_id: String(userId), payout_id: payoutRow.id },
+      });
+      await query(
+        `UPDATE payouts SET stripe_transfer_id = $1, status = 'succeeded', succeeded_at = NOW() WHERE id = $2`,
+        [transfer.id, payoutRow.id]
+      );
+      await audit(req, 'referral_payout_succeeded', {
+        payout_id: payoutRow.id,
+        amount_cents: balance,
+        transfer_id: transfer.id,
+      });
+      return { ok: true, amountCents: balance, amountEur: balance / 100, transferId: transfer.id };
+    } catch (e) {
+      // Rollback cagnotte
+      await query(
+        `UPDATE users SET cagnotte_balance_cents = cagnotte_balance_cents + $1 WHERE id = $2`,
+        [balance, userId]
+      );
+      await query(
+        `UPDATE payouts SET status = 'failed', failed_reason = $1 WHERE id = $2`,
+        [e.message?.slice(0, 500) || 'unknown', payoutRow.id]
+      );
+      await audit(req, 'referral_payout_failed', {
+        payout_id: payoutRow.id,
+        error: e.message,
+      });
+      return reply.code(500).send({ error: 'transfert échoué : ' + (e.message || 'erreur inconnue') });
+    }
+  });
+
+  // GET /referral/payouts — historique retraits
+  app.get('/referral/payouts', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const userId = req.user.sub;
+    const rows = await query(
+      `SELECT id, amount_cents, status, created_at, succeeded_at, failed_reason
+       FROM payouts WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      [userId]
+    );
+    return {
+      payouts: (rows || []).map(p => ({
+        ...p,
+        amount_eur: (p.amount_cents || 0) / 100,
+      })),
+    };
   });
 }
