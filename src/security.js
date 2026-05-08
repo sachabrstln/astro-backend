@@ -84,7 +84,7 @@ export function generateJti() {
 // Envoie un email via Resend. Si RESEND_API_KEY absent, log seulement (dev).
 export async function sendEmail({ to, subject, html, text }) {
   const key = process.env.RESEND_API_KEY;
-  const from = process.env.EMAIL_FROM || 'Astro <no-reply@astrodash.app>';
+  const from = process.env.EMAIL_FROM || 'Astro <no-reply@astro-pro.app>';
   if (!key) {
     console.warn('[email] RESEND_API_KEY absent — email non envoyé à ' + to + ' : ' + subject);
     return { ok: true, skipped: true };

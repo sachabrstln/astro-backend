@@ -59,8 +59,8 @@ await app.register(cors, {
     if (origin.startsWith('chrome-extension://')) return cb(null, true);
     const allowed = [
       process.env.FRONTEND_URL,
-      'https://astrodash.app',
-      'https://www.astrodash.app',
+      'https://astro-pro.app',
+      'https://www.astro-pro.app',
       'http://localhost:3000',
       'http://localhost:5173',
     ].filter(Boolean);

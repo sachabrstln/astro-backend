@@ -5,7 +5,8 @@ import { query, queryOne, pool } from './db.js';
 
 // Liste blanche des emails admin. Hardcoded — pas dans la DB pour éviter
 // qu'un compromis de la DB n'élève quelqu'un en admin sans déploiement.
-const ADMIN_EMAILS = ['sachabruas@gmail.com'];
+// v1.3.7 : email pro Astro + perso (double accès admin)
+const ADMIN_EMAILS = ['astrodashapp@gmail.com', 'sachabruas@gmail.com'];
 
 function isAdmin(req) {
   const email = (req.user?.email || '').toLowerCase().trim();

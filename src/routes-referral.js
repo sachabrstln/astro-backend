@@ -122,7 +122,7 @@ export default async function referralRoutes(app) {
     const stats = await getReferrerStats(userId);
     return {
       code,
-      shareUrl: `https://astrodash.app/?ref=${code}`,
+      shareUrl: `https://astro-pro.app/?ref=${code}`,
       stats: {
         active: parseInt(stats.active_filleuls || 0),
         pending: parseInt(stats.pending_filleuls || 0),
