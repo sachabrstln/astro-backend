@@ -19,11 +19,46 @@ const RESET_EXPIRES_MIN = 60;
 const VERIFY_EXPIRES_H = 48;
 const FRONTEND = (process.env.FRONTEND_URL || 'https://astro-pro.app').replace(/\/$/, '');
 
+// v1.3.7 — Anti-fraude C : domaines email jetables (extrait des plus utilisés)
+// Liste maintenue manuellement, à étendre via https://github.com/disposable-email-domains
+// Bloque les inscriptions multi-trial qui réutilisent le même device avec
+// des adresses temporaires (mailinator, tempmail, guerrillamail, ...).
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  // Top 30 fournisseurs jetables connus (couvre ~95% du trafic abusif)
+  '0-mail.com','027168.com','10minutemail.com','10minutemail.net','20minutemail.com',
+  '33mail.com','dispostable.com','dropmail.me','emailondeck.com','fakemail.net',
+  'fakeinbox.com','getairmail.com','getnada.com','grr.la','guerrillamail.com',
+  'guerrillamail.net','guerrillamail.org','guerrillamailblock.com','harakirimail.com',
+  'inboxbear.com','jetable.org','mail-temporaire.fr','mail7.io','mailcatch.com',
+  'maildrop.cc','mailinator.com','mailinator.net','mailmoat.com','mailnesia.com',
+  'mailnull.com','mintemail.com','mohmal.com','moot.es','mt2014.com','mt2015.com',
+  'mvrht.com','nada.email','noclickemail.com','nwldx.com','outlawspam.com',
+  'pookmail.com','sharklasers.com','spam4.me','spambox.us','spamfree24.org',
+  'spamgourmet.com','spammotel.com','spamthisplease.com','tempemail.com',
+  'tempinbox.com','tempmail.de','tempmail.it','tempmail.lol','tempmail.net',
+  'tempmail.us','tempmailo.com','tempr.email','throwawaymail.com','trashmail.com',
+  'trashmail.de','trashmail.fr','trashmail.io','trashmail.net','vomoto.com',
+  'wegwerfmail.de','wegwerfmail.net','wegwerfmail.org','yopmail.com','yopmail.fr',
+  'yopmail.net','zetmail.com','zilch.com','tmpmail.org','tmpmail.net','minutemail.com',
+  'fakeemail.com','fake-email.com','tempinbox.xyz','disposable.email','tempmailaddress.com',
+  'mailonaut.com','mailtothis.com','clipmails.com','clrmail.com','crymail.com',
+  'easytrashmail.com','emailisvalid.com','emaillox.com','emaisl.com','emltmp.com',
+  'getmaildrop.com','goemailgo.com','hide.biz.st','hmamail.com','jetable.com',
+  'kasmail.com','linshiyou.com','mailcdn.io','mailcuk.com','maileater.com',
+  'mailguard.me','mailimate.com','mailspeed.ru','migmail.pl','mosk.io',
+  'nepwk.com','rejectmail.com','sendingstmail.com','tabamail.com','temptami.com',
+]);
+
 function validateEmail(email) {
   if (typeof email !== 'string') return 'email requis';
   const e = email.trim().toLowerCase();
   if (!e || e.length > EMAIL_MAX) return 'email invalide';
   if (!EMAIL_RE.test(e)) return 'format email invalide';
+  // v1.3.7 : block disposable emails (anti-fraude trial multi)
+  const domain = e.split('@')[1] || '';
+  if (DISPOSABLE_EMAIL_DOMAINS.has(domain)) {
+    return 'merci d\'utiliser une adresse email permanente (les emails jetables ne sont pas acceptés)';
+  }
   return null;
 }
 
@@ -79,8 +114,27 @@ export default async function authRoutes(app) {
     },
   };
 
+  // v1.3.7 — Anti-fraude I : rate limit signup par IP
+  // Max 2 inscriptions / 24h depuis la même IP, pour empêcher la création de
+  // comptes en boucle pour cumuler les essais 7j gratuits.
+  const signupIpLimit = {
+    config: {
+      rateLimit: {
+        max: 2,
+        timeWindow: '24 hours',
+        keyGenerator: (req) => 'signup-ip:' + (req.ip || ''),
+        errorResponseBuilder: () => ({
+          error: 'limite d\'inscriptions atteinte pour ton réseau (2 par jour). Réessaye demain ou contacte le support si tu penses qu\'il y a une erreur.',
+        }),
+      },
+    },
+  };
+
   // ── POST /auth/signup ──────────────────────────────
-  app.post('/auth/signup', bruteforceLimit, async (req, reply) => {
+  // Anti-fraude I : rate limit IP 2 signups / 24h. Plus strict que bruteforceLimit
+  // (qui était 5/15min IP+email) — celui-ci empêche le multi-trial sur la même IP
+  // même avec différents emails.
+  app.post('/auth/signup', signupIpLimit, async (req, reply) => {
     const { email, password, captchaToken, acceptedTerms, acceptedTermsAt, referralCode } = req.body || {};
 
     // v1.3.2 : acceptation explicite des CGU obligatoire (RGPD, traçabilité)

@@ -373,24 +373,55 @@ async function handleStripeEvent(event) {
     }
     case 'payment_method.attached': {
       // v1.3.7 : capture le card.fingerprint pour anti-fraude trial
+      // v1.3.7 — Anti-fraude F : bloque les cartes prépayées éphémères
+      // (Revolut Lite, Vivid Money, N26 ephemeral, Wise virtual, ...).
+      // Stripe expose card.funding : 'credit' | 'debit' | 'prepaid' | 'unknown'.
+      // On refuse 'prepaid' → cancel la subscription + flag l'user.
       try {
         const customerId = obj.customer;
         if (!customerId) break;
         const fp = obj.card?.fingerprint;
+        const funding = obj.card?.funding;
         if (!fp) break;
         // Find user by stripe_customer_id
         const u = await queryOne('SELECT id, email FROM users WHERE stripe_customer_id = $1', [customerId]);
         if (!u) break;
-        // Update user
+
+        // ── BLOCK PREPAID ──
+        if (funding === 'prepaid') {
+          console.warn(`[FRAUD] User ${u.id} (${u.email}) tente d'utiliser une carte PREPAID — refus`);
+          // Cancel la subscription en cours (si elle existe)
+          try {
+            const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 5 });
+            for (const s of subs.data) {
+              if (['active', 'trialing', 'past_due'].includes(s.status)) {
+                await stripe.subscriptions.cancel(s.id, { invoice_now: false, prorate: false });
+              }
+            }
+          } catch (e) { console.error('[prepaid cancel sub]', e.message); }
+          // Flag user pour empêcher tout accès
+          await query(
+            `UPDATE users SET plan = 'none', plan_status = 'blocked_prepaid', card_fingerprint = $1 WHERE id = $2`,
+            [fp, u.id]
+          );
+          // Audit pour traçabilité
+          try {
+            await query(
+              `INSERT INTO audit_log (user_id, action, details, created_at) VALUES ($1, $2, $3, NOW())`,
+              [u.id, 'fraud_prepaid_card_blocked', JSON.stringify({ fp: fp.slice(0, 8), brand: obj.card?.brand, country: obj.card?.country })]
+            );
+          } catch (e) {}
+          break;
+        }
+
+        // ── Carte normale : capture fingerprint + check anti-multi-trial ──
         await query(`UPDATE users SET card_fingerprint = $1 WHERE id = $2`, [fp, u.id]);
-        // Insert dans trial_history (si pas déjà là pour ce user)
         await query(
           `INSERT INTO trial_history (user_id, email_hash, card_fingerprint, ip_address)
            SELECT $1, $2, $3, signup_ip FROM users WHERE id = $1
              AND NOT EXISTS (SELECT 1 FROM trial_history WHERE user_id = $1 AND card_fingerprint = $3)`,
           [u.id, sha256(u.email || ''), fp]
         );
-        // Si la carte a déjà été utilisée par un AUTRE user, c'est suspect
         const otherUsage = await queryOne(
           `SELECT user_id FROM trial_history WHERE card_fingerprint = $1 AND user_id != $2 LIMIT 1`,
           [fp, u.id]
