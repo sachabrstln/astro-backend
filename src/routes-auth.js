@@ -155,11 +155,11 @@ export default async function authRoutes(app) {
     const pErr = validatePassword(password);
     if (pErr) return reply.code(400).send({ error: pErr });
 
-    // Validation code de parrainage (optionnel)
+    // v1.3.8 : code parrainage 4-12 chars (custom user-chosen)
     let validReferralCode = null;
     if (referralCode && typeof referralCode === 'string') {
       const cleanRef = referralCode.trim().toUpperCase();
-      if (!/^[A-Z0-9]{6,8}$/.test(cleanRef)) {
+      if (!/^[A-Z0-9]{4,12}$/.test(cleanRef)) {
         return reply.code(400).send({ error: 'code de parrainage invalide' });
       }
       validReferralCode = cleanRef;
@@ -192,6 +192,20 @@ export default async function authRoutes(app) {
        RETURNING id, email, plan, plan_status, email_verified`,
       [cleanEmail, hash]
     );
+
+    // v1.3.8 : si code parrainage valide fourni, link filleul ← parrain
+    if (validReferralCode) {
+      try {
+        const ref = await import('./routes-referral.js');
+        if (ref.linkReferralAtSignup) {
+          await ref.linkReferralAtSignup(user.id, validReferralCode);
+        }
+      } catch (e) {
+        // Échec du link (code invalide, self-referral, etc.) — on n'échoue PAS le signup
+        // L'user est créé même sans lien parrainage
+        req.log.warn({ err: e.message, code: validReferralCode }, 'linkReferralAtSignup failed');
+      }
+    }
 
     // Token de vérif email
     const verifToken = generateToken();

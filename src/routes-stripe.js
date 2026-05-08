@@ -427,10 +427,10 @@ async function handleStripeEvent(event) {
             `UPDATE users SET plan = 'none', plan_status = 'blocked_prepaid', card_fingerprint = $1 WHERE id = $2`,
             [fp, u.id]
           );
-          // Audit pour traçabilité
+          // Audit pour traçabilité (colonne 'metadata' selon schéma actuel)
           try {
             await query(
-              `INSERT INTO audit_log (user_id, action, details, created_at) VALUES ($1, $2, $3, NOW())`,
+              `INSERT INTO audit_log (user_id, action, metadata, created_at) VALUES ($1, $2, $3, NOW())`,
               [u.id, 'fraud_prepaid_card_blocked', JSON.stringify({ fp: fp.slice(0, 8), brand: obj.card?.brand, country: obj.card?.country })]
             );
           } catch (e) {}
