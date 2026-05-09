@@ -207,25 +207,28 @@ export default async function authRoutes(app) {
       }
     }
 
-    // Token de vérif email
-    const verifToken = generateToken();
-    const verifExpires = new Date(Date.now() + VERIFY_EXPIRES_H * 3600 * 1000);
+    // v1.3.9 : code à 6 chiffres au lieu d'un lien (UX plus simple, anti-bot meilleure)
+    // Le code expire dans 30 min. On stocke le hash du code en DB (anti-fuite).
+    const verifCode = String(Math.floor(100000 + Math.random() * 900000)); // 100000-999999
+    const verifExpires = new Date(Date.now() + 30 * 60 * 1000); // 30 min
     await query(
       `INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [user.id, hashToken(verifToken), verifExpires]
+      [user.id, hashToken(verifCode), verifExpires]
     );
-    const verifUrl = `${FRONTEND}/verify-email?token=${verifToken}`;
     await sendEmail({
       to: user.email,
-      subject: 'Confirme ton email — Astro',
+      subject: 'Ton code de vérification Astro : ' + verifCode,
       html: `
         <div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto;padding:24px;">
           <h2 style="color:#7F77DD;">Bienvenue sur Astro !</h2>
-          <p>Merci d'avoir créé ton compte. Clique sur le lien ci-dessous pour confirmer ton email :</p>
-          <p><a href="${verifUrl}" style="display:inline-block;padding:12px 24px;background:#7F77DD;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Confirmer mon email</a></p>
-          <p style="color:#666;font-size:13px;">Ce lien expire dans ${VERIFY_EXPIRES_H}h. Si tu n'es pas à l'origine de cette inscription, ignore simplement ce message.</p>
+          <p>Merci d'avoir créé ton compte. Voici ton code de vérification :</p>
+          <div style="margin:24px 0;padding:24px;background:#F7F6FF;border-radius:12px;text-align:center;">
+            <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#5C54B8;font-family:'Courier New',monospace;">${verifCode}</div>
+          </div>
+          <p style="font-size:14px;color:#444;">Entre ce code dans la page d'inscription pour confirmer ton compte.</p>
+          <p style="color:#888;font-size:12px;margin-top:24px;">Ce code expire dans <strong>30 minutes</strong>. Si tu n'es pas à l'origine de cette inscription, ignore simplement ce message — aucun compte n'est créé tant que le code n'est pas validé.</p>
         </div>`,
-      text: `Bienvenue sur Astro. Confirme ton email : ${verifUrl}`,
+      text: `Ton code de vérification Astro : ${verifCode}\n\nCe code expire dans 30 minutes.`,
     });
 
     await audit(req, 'signup_success', { user_id: user.id });
@@ -417,16 +420,47 @@ export default async function authRoutes(app) {
   });
 
   // ── POST /auth/verify-email ────────────────────────
-  app.post('/auth/verify-email', async (req, reply) => {
-    const { token } = req.body || {};
-    if (!token || typeof token !== 'string') return reply.code(400).send({ error: 'token requis' });
-    const tokenHash = hashToken(token);
-    const verif = await queryOne(
-      `SELECT id, user_id, expires_at, used_at FROM email_verifications WHERE token_hash = $1`,
-      [tokenHash]
-    );
+  // v1.3.9 : accepte SOIT un token long (legacy, compat liens email anciens)
+  // SOIT un code à 6 chiffres (nouveau flow). Hash identique des deux côtés.
+  app.post('/auth/verify-email', {
+    config: {
+      rateLimit: {
+        max: 10, timeWindow: '15 minutes',
+        keyGenerator: (req) => 'verify-email:' + (req.ip || ''),
+        errorResponseBuilder: () => ({ error: 'trop d\'essais, attends 15 min' }),
+      },
+    },
+  }, async (req, reply) => {
+    const { token, code, email } = req.body || {};
+    const value = String(token || code || '').trim();
+    if (!value) return reply.code(400).send({ error: 'code ou token requis' });
+    // Normalise code 6 chiffres (espaces, tirets autorisés à la saisie)
+    const normalized = /^[0-9\s\-]+$/.test(value)
+      ? value.replace(/[^0-9]/g, '')
+      : value;
+    if (normalized.length === 0) return reply.code(400).send({ error: 'code invalide' });
+
+    const tokenHash = hashToken(normalized);
+    // v1.3.9 : si email fourni, on filtre par user_id pour éviter qu'un mauvais code
+    // matche par hasard un autre user (edge case mais propre).
+    let verif;
+    if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      const u = await queryOne(`SELECT id FROM users WHERE email = $1`, [email.toLowerCase().trim()]);
+      if (u) {
+        verif = await queryOne(
+          `SELECT id, user_id, expires_at, used_at FROM email_verifications
+           WHERE token_hash = $1 AND user_id = $2 ORDER BY id DESC LIMIT 1`,
+          [tokenHash, u.id]
+        );
+      }
+    } else {
+      verif = await queryOne(
+        `SELECT id, user_id, expires_at, used_at FROM email_verifications WHERE token_hash = $1 ORDER BY id DESC LIMIT 1`,
+        [tokenHash]
+      );
+    }
     if (!verif || verif.used_at || new Date(verif.expires_at) < new Date()) {
-      return reply.code(400).send({ error: 'token invalide ou expiré' });
+      return reply.code(400).send({ error: 'code invalide ou expiré' });
     }
     await query(`UPDATE users SET email_verified = TRUE WHERE id = $1`, [verif.user_id]);
     await query(`UPDATE email_verifications SET used_at = NOW() WHERE id = $1`, [verif.id]);
@@ -435,6 +469,7 @@ export default async function authRoutes(app) {
   });
 
   // ── POST /auth/resend-verification ─────────────────
+  // v1.3.9 : renvoie un nouveau code 6 chiffres (au lieu d'un lien).
   app.post('/auth/resend-verification', {
     onRequest: [app.authenticate],
     config: { rateLimit: { max: 3, timeWindow: '15 minutes' } },
@@ -443,23 +478,24 @@ export default async function authRoutes(app) {
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
     if (user.email_verified) return { ok: true, alreadyVerified: true };
 
-    const verifToken = generateToken();
-    const expires = new Date(Date.now() + VERIFY_EXPIRES_H * 3600 * 1000);
+    const verifCode = String(Math.floor(100000 + Math.random() * 900000));
+    const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 min
     await query(
       `INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [user.id, hashToken(verifToken), expires]
+      [user.id, hashToken(verifCode), expires]
     );
-    const verifUrl = `${FRONTEND}/verify-email?token=${verifToken}`;
     await sendEmail({
       to: user.email,
-      subject: 'Confirme ton email — Astro',
+      subject: 'Nouveau code de vérification Astro : ' + verifCode,
       html: `<div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto;padding:24px;">
-        <h2 style="color:#7F77DD;">Confirme ton email</h2>
-        <p>Clique sur le lien ci-dessous pour confirmer ton email :</p>
-        <p><a href="${verifUrl}" style="display:inline-block;padding:12px 24px;background:#7F77DD;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Confirmer mon email</a></p>
-        <p style="color:#666;font-size:13px;">Ce lien expire dans ${VERIFY_EXPIRES_H}h.</p>
+        <h2 style="color:#7F77DD;">Nouveau code de vérification</h2>
+        <div style="margin:24px 0;padding:24px;background:#F7F6FF;border-radius:12px;text-align:center;">
+          <div style="font-size:36px;font-weight:800;letter-spacing:8px;color:#5C54B8;font-family:'Courier New',monospace;">${verifCode}</div>
+        </div>
+        <p style="font-size:14px;color:#444;">Entre ce code dans Astro pour confirmer ton compte.</p>
+        <p style="color:#888;font-size:12px;margin-top:16px;">Ce code expire dans <strong>30 minutes</strong>.</p>
       </div>`,
-      text: `Confirme ton email : ${verifUrl}`
+      text: `Ton code de vérification Astro : ${verifCode}\n\nCe code expire dans 30 minutes.`
     });
     return { ok: true };
   });

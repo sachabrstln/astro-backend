@@ -133,7 +133,7 @@ export default async function referralRoutes(app) {
   app.get('/referral/me', { onRequest: [app.authenticate] }, async (req, reply) => {
     const userId = req.user.sub;
     const u = await queryOne(
-      `SELECT referral_code, referral_code_chosen_at, cagnotte_balance_cents,
+      `SELECT email, referral_code, referral_code_chosen_at, cagnotte_balance_cents,
               cagnotte_lifetime_cents, stripe_connect_account_id,
               connect_onboarding_complete
        FROM users WHERE id = $1`,
@@ -143,6 +143,7 @@ export default async function referralRoutes(app) {
 
     const stats = await getReferrerStats(userId);
     return {
+      userEmail: u.email,                       // pour préremplir le template mailto
       code: u.referral_code || null,           // null si pas encore choisi
       codeChosenAt: u.referral_code_chosen_at, // si défini, le code est immutable
       shareUrl: u.referral_code ? `https://astro-pro.app/?ref=${u.referral_code}` : null,
@@ -174,41 +175,56 @@ export default async function referralRoutes(app) {
     };
   });
 
-  // POST /referral/set-code — choisit son code (immutable une fois set)
-  app.post('/referral/set-code', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const userId = req.user.sub;
-    const code = String(req.body?.code || '').trim().toUpperCase();
-    if (!CODE_RE.test(code)) {
-      return reply.code(400).send({ error: 'code invalide (4 à 12 caractères, lettres majuscules ou chiffres)' });
-    }
-    // Mots interdits (pour pas qu'un user prenne ASTRO, ADMIN, etc.)
-    const RESERVED = ['ASTRO', 'ADMIN', 'STAFF', 'TEST', 'NULL', 'NONE', 'SUPPORT', 'ASTROPRO'];
-    if (RESERVED.includes(code)) {
-      return reply.code(400).send({ error: 'ce code est réservé, choisis-en un autre' });
-    }
+  // v1.3.9 : programme parrainage sur candidature manuelle.
+  // /set-code reste exposé mais accessible UNIQUEMENT aux admins (validation manuelle
+  // après réception du mail de candidature à support@astro-pro.app).
+  // L'admin appelle l'endpoint avec { userId, code } pour attribuer le code après revue.
+  const ADMIN_EMAILS = ['astrodashapp@gmail.com', 'sachabruas@gmail.com'];
+  function isAdminReq(req) {
+    const e = (req.user?.email || '').toLowerCase().trim();
+    return !!e && ADMIN_EMAILS.includes(e);
+  }
 
-    // Check si l'user a déjà un code (immutable)
-    const me = await queryOne(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
-    if (me?.referral_code) {
-      return reply.code(409).send({ error: 'tu as déjà choisi ton code, il ne peut pas être modifié' });
+  // POST /referral/admin/grant-code — Admin uniquement : attribue un code à un user
+  // Body : { userId: number, code: string }
+  app.post('/referral/admin/grant-code', { onRequest: [app.authenticate] }, async (req, reply) => {
+    if (!isAdminReq(req)) return reply.code(403).send({ error: 'admin only' });
+    const targetUserId = parseInt(req.body?.userId, 10);
+    const code = String(req.body?.code || '').trim().toUpperCase();
+    if (!targetUserId) return reply.code(400).send({ error: 'userId requis' });
+    if (!CODE_RE.test(code)) {
+      return reply.code(400).send({ error: 'code invalide (4-12 caractères A-Z/0-9)' });
     }
-    // Check unicité globale
+    const RESERVED = ['ASTRO', 'ADMIN', 'STAFF', 'TEST', 'NULL', 'NONE', 'SUPPORT', 'ASTROPRO', 'OFFICIAL'];
+    if (RESERVED.includes(code)) {
+      return reply.code(400).send({ error: 'ce code est réservé' });
+    }
+    const me = await queryOne(`SELECT referral_code FROM users WHERE id = $1`, [targetUserId]);
+    if (!me) return reply.code(404).send({ error: 'user introuvable' });
+    if (me.referral_code) {
+      return reply.code(409).send({ error: 'cet user a déjà un code : ' + me.referral_code });
+    }
     const taken = await queryOne(`SELECT id FROM users WHERE referral_code = $1`, [code]);
-    if (taken) {
-      return reply.code(409).send({ error: 'ce code est déjà pris, choisis-en un autre' });
-    }
+    if (taken) return reply.code(409).send({ error: 'code déjà pris par user ' + taken.id });
 
     try {
       await query(
         `UPDATE users SET referral_code = $1, referral_code_chosen_at = NOW() WHERE id = $2`,
-        [code, userId]
+        [code, targetUserId]
       );
-      await audit(req, 'referral_code_set', { code });
+      await audit(req, 'referral_code_granted_admin', { target_user_id: targetUserId, code });
     } catch (e) {
-      // Race condition UNIQUE → quelqu'un d'autre l'a pris en même temps
-      return reply.code(409).send({ error: 'ce code vient d\'être pris, choisis-en un autre' });
+      return reply.code(409).send({ error: 'race condition, retry' });
     }
-    return { ok: true, code, shareUrl: `https://astro-pro.app/?ref=${code}` };
+    return { ok: true, code, userId: targetUserId, shareUrl: `https://astro-pro.app/?ref=${code}` };
+  });
+
+  // POST /referral/set-code — DÉSACTIVÉ pour les users (programme sur candidature)
+  // L'endpoint répond 403 avec message d'orientation.
+  app.post('/referral/set-code', { onRequest: [app.authenticate] }, async (req, reply) => {
+    return reply.code(403).send({
+      error: 'Le programme parrainage est sur candidature manuelle. Envoie un mail à support@astro-pro.app avec ta présentation pour recevoir un code.'
+    });
   });
 
   // POST /referral/validate-code — vérifie qu'un code est valide (signup form)

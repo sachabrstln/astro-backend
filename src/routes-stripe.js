@@ -484,9 +484,73 @@ async function handleStripeEvent(event) {
       break;
     }
     case 'invoice.payment_failed': {
+      // v1.3.9 : politique stricte — si Stripe nous notifie un échec de paiement
+      // sur un renouvellement (cycle), on cancel IMMÉDIATEMENT la subscription.
+      // Pas de "past_due" + retry smart : payment failed = abonnement terminé.
+      // L'utilisateur devra refaire un signup s'il veut revenir.
       const userId = parseInt(obj.subscription_details?.metadata?.user_id || '0', 10);
-      if (userId) {
-        await query(`UPDATE users SET plan_status = 'past_due' WHERE id = $1`, [userId]);
+      const subId = obj.subscription;
+      if (!userId) break;
+      try {
+        // Cancel immédiat de la sub Stripe (au lieu de la laisser en past_due)
+        if (subId) {
+          try {
+            await stripe.subscriptions.cancel(subId, { invoice_now: false, prorate: false });
+          } catch (e) {
+            // La sub peut déjà être canceled si Stripe l'a fait avant — on ignore
+            console.warn('[invoice.payment_failed] cancel sub error (ignoré):', e.message);
+          }
+        }
+        // Marque l'user comme inactif tout de suite
+        await query(
+          `UPDATE users SET plan_status = 'inactive', plan = 'none',
+                            plan_expires_at = NULL, cancel_at = NULL,
+                            stripe_subscription_id = NULL
+           WHERE id = $1`,
+          [userId]
+        );
+        // Stoppe la commission parrain si filleul (le parrain ne touche plus de commission
+        // sur ce filleul puisqu'il n'est plus client payant)
+        try {
+          const ref = await import('./routes-referral.js');
+          if (ref.stopReferralOnCancellation) await ref.stopReferralOnCancellation(userId);
+        } catch (e) {}
+        // Audit
+        try {
+          await query(
+            `INSERT INTO audit_log (user_id, action, metadata, created_at) VALUES ($1, $2, $3, NOW())`,
+            [userId, 'subscription_canceled_payment_failed', JSON.stringify({
+              invoice_id: obj.id,
+              amount_due_cents: obj.amount_due || 0,
+              attempt_count: obj.attempt_count || 1,
+            })]
+          );
+        } catch (e) {}
+        // Email à l'user pour le notifier
+        try {
+          const u = await queryOne('SELECT email FROM users WHERE id = $1', [userId]);
+          if (u?.email) {
+            const { sendEmail } = await import('./security.js');
+            await sendEmail({
+              to: u.email,
+              subject: 'Astro — abonnement résilié (paiement échoué)',
+              html: `<div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto;padding:24px;">
+                <h2 style="color:#DC2626;">Abonnement résilié</h2>
+                <p>Le paiement de ton renouvellement Astro n'a pas pu être traité par ta banque (carte refusée, plafond atteint, ou solde insuffisant).</p>
+                <p>Conformément à nos conditions, ton abonnement a été <strong>résilié immédiatement</strong> et l'accès aux fonctionnalités est suspendu.</p>
+                <p>Pour reprendre Astro, refais un signup avec une carte valide sur <a href="https://astro-pro.app">astro-pro.app</a>.</p>
+                <p style="color:#888;font-size:12px;margin-top:24px;">Si tu penses que c'est une erreur (carte temporairement bloquée par exemple), contacte-nous à support@astro-pro.app dans les 7 jours et on regardera ton dossier.</p>
+              </div>`,
+              text: `Astro — Abonnement résilié.\n\nLe paiement de ton renouvellement n'a pas pu être traité. L'abonnement est résilié immédiatement.\n\nPour reprendre, refais un signup sur https://astro-pro.app`,
+            });
+          }
+        } catch (e) { console.warn('[payment_failed email]', e.message); }
+      } catch (e) {
+        console.error('[invoice.payment_failed] handler error:', e.message);
+        // Fallback : au moins marquer past_due si on a échoué quelque part
+        try {
+          await query(`UPDATE users SET plan_status = 'inactive' WHERE id = $1`, [userId]);
+        } catch (e2) {}
       }
       break;
     }
