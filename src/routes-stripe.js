@@ -159,15 +159,17 @@ export default async function stripeRoutes(app) {
   });
 
   // ── POST /api/stripe/pack/checkout — achat d'un pack Multipost IA (v1.3.7)
-  // Body : { pack: 'multipost-10' | 'multipost-25' | 'multipost-75' }
+  // Body : { pack: 'multipost-10' | 'multipost-25' | 'multipost-75' | 'multipost-100' }
   // Crée une Stripe Checkout Session en mode 'payment' (one-time, pas subscription).
   // Le webhook checkout.session.completed grant les crédits dans pack_credits.
+  // v1.3.10 : nouveaux prix (5/10/27/35€) + pack 100 "Ultime" + 1 crédit = 1 annonce
   app.post('/api/stripe/pack/checkout', { onRequest: [app.authenticate] }, async (req, reply) => {
     const { pack } = req.body || {};
     const PACK_MAP = {
-      'multipost-10': { priceId: process.env.STRIPE_PACK_PRICE_10, size: 10 },
-      'multipost-25': { priceId: process.env.STRIPE_PACK_PRICE_25, size: 25 },
-      'multipost-75': { priceId: process.env.STRIPE_PACK_PRICE_75, size: 75 },
+      'multipost-10':  { priceId: process.env.STRIPE_PACK_PRICE_10,  size: 10 },
+      'multipost-25':  { priceId: process.env.STRIPE_PACK_PRICE_25,  size: 25 },
+      'multipost-75':  { priceId: process.env.STRIPE_PACK_PRICE_75,  size: 75 },
+      'multipost-100': { priceId: process.env.STRIPE_PACK_PRICE_100, size: 100 },
     };
     const def = PACK_MAP[pack];
     if (!def) return reply.code(400).send({ error: 'pack invalide' });

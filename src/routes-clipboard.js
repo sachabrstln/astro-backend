@@ -484,26 +484,10 @@ export default async function clipboardRoutes(app) {
       } catch (e) {
         app.log.warn({ err: e }, 'ai_usage insert failed (non-fatal)');
       }
-      if (consumeFrom === 'pack' && packIdToDebit) {
-        try {
-          // Decrement atomique (pas de race : remaining > 0 garanti par WHERE)
-          const upd = await queryOne(
-            `UPDATE pack_credits SET remaining = remaining - 1
-             WHERE id = $1 AND remaining > 0
-             RETURNING id, remaining`,
-            [packIdToDebit]
-          );
-          if (upd) {
-            await query(
-              `INSERT INTO pack_credit_usage (user_id, pack_credit_id, feature)
-               VALUES ($1, $2, 'bg-swap')`,
-              [user.id, upd.id]
-            );
-          }
-        } catch (e) {
-          app.log.warn({ err: e }, 'pack_credit decrement failed (non-fatal)');
-        }
-      }
+      // v1.3.10 : la décrémentation se fait MAINTENANT au moment de la publication
+      // d'annonce (POST /api/clipboard/claim-annonce-credit) plutôt qu'à chaque photo.
+      // 1 crédit pack = 1 ANNONCE publiée, peu importe le nombre de photos dedans.
+      // bg-swap se contente de vérifier que l'user a bien des crédits (pack OU quota Ultra).
 
       // v1.3.10 : si relight a réussi, on renvoie le composite final au client
       // (l'extension n'a plus à faire le composite — elle fait juste l'anti-pHash).
@@ -660,6 +644,81 @@ export default async function clipboardRoutes(app) {
     }
   });
 
+  // ─────── POST /api/clipboard/claim-annonce-credit ────────
+  // v1.3.10 : décrémente 1 crédit pack par ANNONCE publiée avec succès.
+  // Body : { studio: bool } — si true, décrémente 1.5 au lieu de 1
+  // 1 crédit = 1 annonce Standard, 1.5 crédit = 1 annonce Studio.
+  app.post('/api/clipboard/claim-annonce-credit', {
+    onRequest: [app.authenticate],
+    config: {
+      rateLimit: {
+        max: 200,
+        timeWindow: '1 minute',
+        keyGenerator: (req) => 'claim:' + (req.user?.sub || req.ip),
+      },
+    },
+  }, async (req, reply) => {
+    const userId = req.user?.sub;
+    if (!userId) return reply.code(401).send({ error: 'auth requis' });
+
+    const user = await queryOne(
+      'SELECT id, plan, plan_status FROM users WHERE id = $1',
+      [userId]
+    );
+    if (!user) return reply.code(404).send({ error: 'user introuvable' });
+
+    const subActive = user.plan_status === 'active'
+                   || user.plan_status === 'trialing'
+                   || user.plan_status === 'active_cancelling';
+    if (!subActive) {
+      return reply.code(402).send({ error: 'abonnement actif requis' });
+    }
+
+    // v1.3.10 : Studio = 1.5 crédit, Standard = 1 crédit
+    const isStudio = req.body?.studio === true;
+    const cost = isStudio ? 1.5 : 1.0;
+    const feature = isStudio ? 'multipost-studio' : 'multipost-standard';
+
+    // FIFO : pack le plus vieux non-expiré qui a assez de remaining.
+    const packRow = await queryOne(
+      `SELECT id, remaining FROM pack_credits
+       WHERE user_id = $1 AND expires_at > NOW() AND remaining >= $2
+       ORDER BY expires_at ASC LIMIT 1`,
+      [user.id, cost]
+    );
+
+    if (packRow) {
+      try {
+        // Décrément atomique avec WHERE remaining >= cost pour éviter les races.
+        const upd = await queryOne(
+          `UPDATE pack_credits SET remaining = remaining - $2
+           WHERE id = $1 AND remaining >= $2
+           RETURNING id, remaining`,
+          [packRow.id, cost]
+        );
+        if (upd) {
+          await query(
+            `INSERT INTO pack_credit_usage (user_id, pack_credit_id, feature)
+             VALUES ($1, $2, $3)`,
+            [user.id, upd.id, feature]
+          );
+          return {
+            ok: true,
+            source: 'pack',
+            remaining: parseFloat(upd.remaining),
+            cost,
+          };
+        }
+      } catch (e) {
+        app.log.warn({ err: e }, 'pack credit decrement failed');
+        return reply.code(500).send({ error: 'decrement_failed' });
+      }
+    }
+
+    // Pas de pack avec assez de crédits → fallback Ultra (subActive déjà checké)
+    return { ok: true, source: 'subscription', remaining: null, cost };
+  });
+
   // ─────── GET /api/ai/bg-swap/quota ─────────────────────────
   app.get('/api/ai/bg-swap/quota', {
     onRequest: [app.authenticate],
@@ -682,14 +741,14 @@ export default async function clipboardRoutes(app) {
       used = await getMonthlyUsage(user.id);
     }
 
-    // v1.3.7 : expose le solde de packs Multipost IA pour la modal Copier
+    // v1.3.10 : crédits maintenant fractionnaires (NUMERIC) — Studio coûte 1.5
     const packRow = await queryOne(
-      `SELECT COALESCE(SUM(remaining), 0)::int AS total
+      `SELECT COALESCE(SUM(remaining), 0)::numeric AS total
        FROM pack_credits
        WHERE user_id = $1 AND expires_at > NOW() AND remaining > 0`,
       [user.id]
     );
-    const packCredits = packRow?.total || 0;
+    const packCredits = parseFloat(packRow?.total || 0);
 
     return {
       ok: true,
