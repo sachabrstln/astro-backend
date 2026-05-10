@@ -111,34 +111,56 @@ export async function stopReferralOnCancellation(refereeUserId) {
   );
 }
 
-// Stats agrégées d'un parrain
+// Stats agrégées d'un parrain — défensif (fallback eur si la colonne cents n'existe pas)
 async function getReferrerStats(referrerUserId) {
-  const stats = await queryOne(
-    `SELECT
-       COUNT(*) FILTER (WHERE status = 'active') AS active_filleuls,
-       COUNT(*) FILTER (WHERE status = 'pending') AS pending_filleuls,
-       COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_filleuls,
-       COALESCE(SUM(parrain_commission_total_cents), 0) AS total_commission_cents
-     FROM referrals
-     WHERE referrer_user_id = $1`,
-    [referrerUserId]
-  );
-  return stats || {};
+  try {
+    const stats = await queryOne(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'active') AS active_filleuls,
+         COUNT(*) FILTER (WHERE status = 'pending') AS pending_filleuls,
+         COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_filleuls,
+         COALESCE(SUM(parrain_commission_total_cents), 0) AS total_commission_cents
+       FROM referrals
+       WHERE referrer_user_id = $1`,
+      [referrerUserId]
+    );
+    return stats || {};
+  } catch (e) {
+    // Migration v2 pas encore appliquée → fallback sur la colonne legacy parrain_commission_total_eur
+    try {
+      const stats = await queryOne(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'active') AS active_filleuls,
+           COUNT(*) FILTER (WHERE status = 'pending') AS pending_filleuls,
+           COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelled_filleuls,
+           COALESCE(SUM(parrain_commission_total_eur * 100), 0) AS total_commission_cents
+         FROM referrals
+         WHERE referrer_user_id = $1`,
+        [referrerUserId]
+      );
+      return stats || {};
+    } catch (e2) {
+      // Pas de table referrals du tout → renvoie zéros
+      return { active_filleuls: 0, pending_filleuls: 0, cancelled_filleuls: 0, total_commission_cents: 0 };
+    }
+  }
 }
 
 // ── ROUTES ─────────────────────────────────────────────────
 export default async function referralRoutes(app) {
 
   // GET /referral/me — code + cagnotte + onboarding status + stats
+  // v1.3.9 : SELECT * pour résilience si la migration parrainage_v2 n'a pas
+  // encore été appliquée en DB. On lit les colonnes optionnelles avec fallback.
   app.get('/referral/me', { onRequest: [app.authenticate] }, async (req, reply) => {
     const userId = req.user.sub;
-    const u = await queryOne(
-      `SELECT email, referral_code, referral_code_chosen_at, cagnotte_balance_cents,
-              cagnotte_lifetime_cents, stripe_connect_account_id,
-              connect_onboarding_complete
-       FROM users WHERE id = $1`,
-      [userId]
-    );
+    let u;
+    try {
+      u = await queryOne(`SELECT * FROM users WHERE id = $1`, [userId]);
+    } catch (e) {
+      app.log.error({ err: e }, '[referral/me] users SELECT failed');
+      return reply.code(500).send({ error: 'erreur DB users' });
+    }
     if (!u) return reply.code(404).send({ error: 'user introuvable' });
 
     const stats = await getReferrerStats(userId);
