@@ -32,14 +32,15 @@ const REPLICATE_API_BASE = 'https://api.replicate.com/v1';
 // override via REPLICATE_BG_MODEL=bria/rmbg-2.0 sur Render.
 const DEFAULT_MODEL = process.env.REPLICATE_BG_MODEL || '851-labs/background-remover';
 
-// v1.3.10 : relight model. IC-Light v2 FBC (Foreground + Background Conditioning)
+// v1.3.10 : relight model. IC-Light Background (background-conditioned variant)
 // re-rend la lumière du sujet pour qu'elle matche celle du fond choisi.
-// ~$0.010/run (resolution 1024). Override : REPLICATE_RELIGHT_MODEL.
-const RELIGHT_MODEL = process.env.REPLICATE_RELIGHT_MODEL || 'zsxkib/ic-light-v2';
+// Coût Replicate officiel : ~$0.033/run sur L40S, ~34s par run.
+// Override possible via env REPLICATE_RELIGHT_MODEL.
+const RELIGHT_MODEL = process.env.REPLICATE_RELIGHT_MODEL || 'zsxkib/ic-light-background';
 
 // Coût estimé par appel pour la trace usage (centimes USD).
 const COST_PER_CALL_USD = parseFloat(process.env.REPLICATE_BG_COST_USD || '0.0015');
-const RELIGHT_COST_USD = parseFloat(process.env.REPLICATE_RELIGHT_COST_USD || '0.010');
+const RELIGHT_COST_USD = parseFloat(process.env.REPLICATE_RELIGHT_COST_USD || '0.033');
 
 // Limites taille input (base64). 8 MB de base64 ≈ 6 MB binaire — large pour
 // une photo Vinted 4K compressée JPEG.
@@ -252,9 +253,6 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
           // Prompt très neutre — on veut juste la lumière, pas re-générer
           // le sujet (sinon l'article change visuellement et c'est pénal pour Vinted).
           prompt: 'product photography, natural lighting, sharp, realistic',
-          // Force lighting derived from background only.
-          bg_source: 'use_background',
-          highres_scale: 1.0,
         },
       }),
     });
