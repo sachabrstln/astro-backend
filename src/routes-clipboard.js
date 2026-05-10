@@ -32,8 +32,14 @@ const REPLICATE_API_BASE = 'https://api.replicate.com/v1';
 // override via REPLICATE_BG_MODEL=bria/rmbg-2.0 sur Render.
 const DEFAULT_MODEL = process.env.REPLICATE_BG_MODEL || '851-labs/background-remover';
 
+// v1.3.10 : relight model. IC-Light v2 FBC (Foreground + Background Conditioning)
+// re-rend la lumière du sujet pour qu'elle matche celle du fond choisi.
+// ~$0.010/run (resolution 1024). Override : REPLICATE_RELIGHT_MODEL.
+const RELIGHT_MODEL = process.env.REPLICATE_RELIGHT_MODEL || 'zsxkib/ic-light-v2';
+
 // Coût estimé par appel pour la trace usage (centimes USD).
-const COST_PER_CALL_USD = parseFloat(process.env.REPLICATE_BG_COST_USD || '0.05');
+const COST_PER_CALL_USD = parseFloat(process.env.REPLICATE_BG_COST_USD || '0.0015');
+const RELIGHT_COST_USD = parseFloat(process.env.REPLICATE_RELIGHT_COST_USD || '0.010');
 
 // Limites taille input (base64). 8 MB de base64 ≈ 6 MB binaire — large pour
 // une photo Vinted 4K compressée JPEG.
@@ -183,6 +189,138 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// v1.3.10 : RELIGHT helper
+// Prend un sujet détouré (PNG transparent) + un fond (JPEG/PNG)
+// → renvoie une image finale où la lumière du sujet a été re-rendue
+// pour matcher l'éclairage implicite du fond. Modèle : IC-Light v2.
+//
+// Cette étape est OPTIONNELLE — appelée seulement si l'extension
+// envoie `relight: true` ET un `background_b64`.
+// ─────────────────────────────────────────────────────────────
+async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgroundMediaType, log) {
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) {
+    const err = new Error('REPLICATE_API_TOKEN_MISSING');
+    err.code = 'config';
+    throw err;
+  }
+
+  const subjectDataUrl = `data:image/png;base64,${subjectPngB64}`;
+  const bgDataUrl = `data:${backgroundMediaType || 'image/jpeg'};base64,${backgroundB64}`;
+  const startedAt = Date.now();
+
+  // Récup latest version du modèle relight
+  let latestVersion;
+  try {
+    const r = await fetch(`${REPLICATE_API_BASE}/models/${RELIGHT_MODEL}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      const err = new Error(`replicate_${r.status}`);
+      err.detail = 'relight_model_info: ' + txt.slice(0, 200);
+      err.statusCode = r.status;
+      throw err;
+    }
+    const info = await r.json();
+    latestVersion = info.latest_version && info.latest_version.id;
+    if (!latestVersion) throw new Error('replicate_relight_no_version');
+  } catch (e) {
+    if (e.message && e.message.startsWith('replicate_')) throw e;
+    const err = new Error('replicate_network');
+    err.detail = e.message;
+    throw err;
+  }
+
+  // IC-Light v2 inputs : `subject_image` (avec alpha) + `background_image`.
+  // Le modèle re-rend la lumière du sujet en fonction du fond et compose
+  // directement la sortie finale.
+  let createRes;
+  try {
+    createRes = await fetch(`${REPLICATE_API_BASE}/predictions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'wait=60',
+      },
+      body: JSON.stringify({
+        version: latestVersion,
+        input: {
+          subject_image: subjectDataUrl,
+          background_image: bgDataUrl,
+          // Prompt très neutre — on veut juste la lumière, pas re-générer
+          // le sujet (sinon l'article change visuellement et c'est pénal pour Vinted).
+          prompt: 'product photography, natural lighting, sharp, realistic',
+          // Force lighting derived from background only.
+          bg_source: 'use_background',
+          highres_scale: 1.0,
+        },
+      }),
+    });
+  } catch (e) {
+    const err = new Error('replicate_network');
+    err.detail = e.message;
+    throw err;
+  }
+
+  if (!createRes.ok) {
+    const txt = await createRes.text().catch(() => '');
+    const err = new Error(`replicate_${createRes.status}`);
+    err.detail = txt.slice(0, 300);
+    err.statusCode = createRes.status;
+    throw err;
+  }
+
+  let prediction = await createRes.json();
+  const POLL_INTERVAL_MS = 1500;
+  const MAX_TOTAL_MS = 90000; // relight peut être plus lent que le bg-remove
+
+  while (
+    prediction.status !== 'succeeded' &&
+    prediction.status !== 'failed' &&
+    prediction.status !== 'canceled' &&
+    (Date.now() - startedAt) < MAX_TOTAL_MS
+  ) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const pollUrl = prediction?.urls?.get;
+    if (!pollUrl) break;
+    try {
+      const pr = await fetch(pollUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (pr.ok) prediction = await pr.json();
+    } catch (_) { /* retry */ }
+  }
+
+  if (prediction.status !== 'succeeded') {
+    const err = new Error('replicate_relight_failed');
+    err.detail = prediction.error || prediction.status || 'unknown';
+    throw err;
+  }
+
+  const out = prediction.output;
+  const url = Array.isArray(out) ? out[0] : (typeof out === 'string' ? out : null);
+  if (!url) throw new Error('replicate_relight_no_output');
+
+  const imgRes = await fetch(url);
+  if (!imgRes.ok) throw new Error(`relight_output_fetch_${imgRes.status}`);
+  const arrayBuf = await imgRes.arrayBuffer();
+  const buf = Buffer.from(arrayBuf);
+
+  log?.info?.({
+    sizeBytes: buf.length,
+    tookMs: Date.now() - startedAt,
+    model: RELIGHT_MODEL,
+  }, 'relight success');
+
+  return {
+    base64: buf.toString('base64'),
+    mediaType: imgRes.headers.get('content-type') || 'image/jpeg',
+    sizeBytes: buf.length,
+    tookMs: Date.now() - startedAt,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
 // Helper : compte les bg-swap consommés par l'user dans le mois
 // courant (TZ Europe/Paris implicite — date_trunc Postgres en UTC,
 // suffisant pour l'usage métier).
@@ -283,7 +421,9 @@ export default async function clipboardRoutes(app) {
     }
 
     // 4. Validation body
-    const { image_b64, mediaType } = req.body || {};
+    // v1.3.10 : nouveaux champs optionnels { background_b64, backgroundMediaType, relight }
+    // permettent de chaîner un relight IA après le détourage.
+    const { image_b64, mediaType, background_b64, backgroundMediaType, relight } = req.body || {};
     if (!image_b64 || typeof image_b64 !== 'string') {
       return reply.code(400).send({ error: 'image_b64 requis' });
     }
@@ -297,19 +437,51 @@ export default async function clipboardRoutes(app) {
     if (/[^A-Za-z0-9+/=]/.test(image_b64.slice(0, 200))) {
       return reply.code(400).send({ error: 'image_b64 invalide' });
     }
+    const wantRelight = relight === true && typeof background_b64 === 'string' && background_b64.length > 0;
+    if (wantRelight) {
+      if (background_b64.length > MAX_INPUT_B64_SIZE) {
+        return reply.code(400).send({ error: 'background_b64 > 6 MB' });
+      }
+      if (backgroundMediaType && !/^image\/(jpeg|jpg|png|webp)$/i.test(backgroundMediaType)) {
+        return reply.code(400).send({ error: 'backgroundMediaType non supporté' });
+      }
+      if (/[^A-Za-z0-9+/=]/.test(background_b64.slice(0, 200))) {
+        return reply.code(400).send({ error: 'background_b64 invalide' });
+      }
+    }
 
-    // 5. Appel Replicate
+    // 5. Appel Replicate — étape 1 : détourage
     try {
       const result = await removeBackgroundReplicate(image_b64, mediaType, app.log);
+
+      // v1.3.10 : étape 2 (optionnelle) — relight IA pour adapter la lumière du sujet au fond
+      // Si le relight échoue, on retombe gracieusement sur le détourage simple
+      // (l'extension fera le composite client-side comme avant).
+      let relightResult = null;
+      let relightError = null;
+      if (wantRelight) {
+        try {
+          relightResult = await relightSubjectOnBackground(
+            result.base64,           // sujet PNG transparent
+            background_b64,
+            backgroundMediaType,
+            app.log,
+          );
+        } catch (e) {
+          relightError = (e.message || 'relight_failed').slice(0, 60);
+          app.log.warn({ err: e, userId: user.id }, 'relight failed, falling back to bg-swap only');
+        }
+      }
 
       // 6. Track usage : double bookkeeping
       //    - ai_usage : compteur global (cost_usd pour admin dashboard)
       //    - pack_credit_usage + decrement remaining (si on consomme un pack)
       try {
+        const totalCost = COST_PER_CALL_USD + (relightResult ? RELIGHT_COST_USD : 0);
         await query(
           `INSERT INTO ai_usage (user_id, kind, tokens_input, tokens_output, cost_usd)
-           VALUES ($1, 'bg-swap', 0, 0, $2)`,
-          [user.id, COST_PER_CALL_USD]
+           VALUES ($1, $2, 0, 0, $3)`,
+          [user.id, relightResult ? 'bg-swap-relight' : 'bg-swap', totalCost]
         );
       } catch (e) {
         app.log.warn({ err: e }, 'ai_usage insert failed (non-fatal)');
@@ -335,12 +507,30 @@ export default async function clipboardRoutes(app) {
         }
       }
 
+      // v1.3.10 : si relight a réussi, on renvoie le composite final au client
+      // (l'extension n'a plus à faire le composite — elle fait juste l'anti-pHash).
+      // Si relight a échoué OU n'a pas été demandé, on renvoie le PNG transparent
+      // et le client compose lui-même avec son fond comme avant.
+      if (relightResult) {
+        return {
+          ok: true,
+          image_b64: relightResult.base64,
+          mediaType: relightResult.mediaType,
+          sizeBytes: relightResult.sizeBytes,
+          tookMs: relightResult.tookMs,
+          relit: true,
+          composite: true, // signale au client : pas besoin de re-composer
+        };
+      }
       return {
         ok: true,
         image_b64: result.base64,
         mediaType: result.mediaType,
         sizeBytes: result.sizeBytes,
         tookMs: result.tookMs,
+        relit: false,
+        composite: false,
+        relightError: relightError || undefined, // remonte au client pour debug si demandé
       };
     } catch (e) {
       app.log.error(
@@ -361,6 +551,111 @@ export default async function clipboardRoutes(app) {
       const safeCode = (e.message || 'unknown').match(/^[a-z_0-9]+/i);
       return reply.code(502).send({
         error: 'erreur API détourage',
+        code: safeCode ? safeCode[0] : 'unknown',
+        detail: IS_PROD ? undefined : (e.detail || e.message),
+      });
+    }
+  });
+
+  // ─────── POST /api/ai/relight ──────────────────────────────
+  // v1.3.10 : prend un sujet DÉJÀ détouré (PNG transparent) + un fond
+  // → renvoie un composite final où la lumière du sujet a été ré-rendue
+  // pour matcher l'éclairage du fond.
+  //
+  // Coût : 1 appel Replicate IC-Light (~$0.010). Décrémente 1 crédit pack
+  // SI on facture le relight comme un swap supplémentaire — pour l'instant
+  // on facture le relight UNIQUEMENT en cost_usd (pas de crédit pack
+  // supplémentaire) car l'user a déjà payé son détourage. C'est l'upsell
+  // "Studio" : on peut soit augmenter le prix des packs, soit créer un
+  // 2e crédit "relight" séparé. Voir TODO.
+  //
+  // Body : { subject_b64, subjectMediaType?, background_b64, backgroundMediaType? }
+  // Réponse : { ok, image_b64 (JPEG composite final), mediaType, sizeBytes, tookMs }
+  app.post('/api/ai/relight', {
+    onRequest: [app.authenticate],
+    bodyLimit: 20 * 1024 * 1024, // 2 images base64
+    config: {
+      rateLimit: {
+        max: 30,
+        timeWindow: '1 minute',
+        keyGenerator: (req) => 'relight:' + (req.user?.sub || req.ip),
+        errorResponseBuilder: () => ({ error: 'trop de relights, attends 1 minute' }),
+      },
+    },
+  }, async (req, reply) => {
+    const userId = req.user?.sub;
+    if (!userId) return reply.code(401).send({ error: 'auth requis' });
+
+    const user = await queryOne(
+      'SELECT id, plan, plan_status FROM users WHERE id = $1',
+      [userId]
+    );
+    if (!user) return reply.code(404).send({ error: 'user introuvable' });
+
+    const subActive = user.plan_status === 'active'
+                   || user.plan_status === 'trialing'
+                   || user.plan_status === 'active_cancelling';
+    if (!subActive) {
+      return reply.code(402).send({
+        error: 'abonnement actif requis',
+        plan: user.plan,
+        plan_status: user.plan_status,
+      });
+    }
+
+    const { subject_b64, subjectMediaType, background_b64, backgroundMediaType } = req.body || {};
+    if (!subject_b64 || typeof subject_b64 !== 'string') {
+      return reply.code(400).send({ error: 'subject_b64 requis' });
+    }
+    if (!background_b64 || typeof background_b64 !== 'string') {
+      return reply.code(400).send({ error: 'background_b64 requis' });
+    }
+    if (subject_b64.length > MAX_INPUT_B64_SIZE) {
+      return reply.code(400).send({ error: 'subject_b64 > 6 MB' });
+    }
+    if (background_b64.length > MAX_INPUT_B64_SIZE) {
+      return reply.code(400).send({ error: 'background_b64 > 6 MB' });
+    }
+    if (/[^A-Za-z0-9+/=]/.test(subject_b64.slice(0, 200))) {
+      return reply.code(400).send({ error: 'subject_b64 invalide' });
+    }
+    if (/[^A-Za-z0-9+/=]/.test(background_b64.slice(0, 200))) {
+      return reply.code(400).send({ error: 'background_b64 invalide' });
+    }
+
+    try {
+      const result = await relightSubjectOnBackground(
+        subject_b64,
+        background_b64,
+        backgroundMediaType,
+        app.log,
+      );
+
+      try {
+        await query(
+          `INSERT INTO ai_usage (user_id, kind, tokens_input, tokens_output, cost_usd)
+           VALUES ($1, 'relight', 0, 0, $2)`,
+          [user.id, RELIGHT_COST_USD]
+        );
+      } catch (e) {
+        app.log.warn({ err: e }, 'ai_usage relight insert failed (non-fatal)');
+      }
+
+      return {
+        ok: true,
+        image_b64: result.base64,
+        mediaType: result.mediaType,
+        sizeBytes: result.sizeBytes,
+        tookMs: result.tookMs,
+      };
+    } catch (e) {
+      app.log.error(
+        { err: e, userId: user.id, code: e.code, detail: e.detail },
+        'relight failed'
+      );
+      const safeCode = (e.message || 'unknown').match(/^[a-z_0-9]+/i);
+      return reply.code(502).send({
+        error: 'erreur API relight',
         code: safeCode ? safeCode[0] : 'unknown',
         detail: IS_PROD ? undefined : (e.detail || e.message),
       });
