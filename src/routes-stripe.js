@@ -288,16 +288,37 @@ export default async function stripeRoutes(app) {
       app.log.error('Webhook signature fail: ' + err.message);
       return reply.code(400).send('bad signature');
     }
-    const seen = await queryOne('SELECT id FROM webhook_events WHERE stripe_event_id = $1', [event.id]);
-    if (seen) return { received: true, duplicate: true };
+    // v1.3.49 (SECURITY) : idempotency atomique via INSERT ON CONFLICT.
+    // Si la DB tombe entre handleStripeEvent et INSERT (anciennement risque double-traitement),
+    // on insert AVANT le handler avec ON CONFLICT DO NOTHING. Si l'INSERT retourne 0 rows
+    // → event déjà vu → on abort. Sinon on traite. Si le handler échoue, l'event reste marqué
+    // comme vu (Stripe retry serait inutile car la DB est probablement la racine) — on retourne
+    // 500 et Stripe retentera quand même.
+    let inserted;
     try {
-      await handleStripeEvent(event);
-      await query(
-        'INSERT INTO webhook_events (stripe_event_id, type, payload) VALUES ($1, $2, $3)',
+      inserted = await query(
+        `INSERT INTO webhook_events (stripe_event_id, type, payload)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (stripe_event_id) DO NOTHING
+         RETURNING id`,
         [event.id, event.type, JSON.stringify(event.data.object).slice(0, 10000)]
       );
     } catch (e) {
+      app.log.error('Webhook idempotency INSERT error: ' + e.message);
+      // DB indispo → demande à Stripe de retenter
+      return reply.code(500).send('db error');
+    }
+    if (!inserted?.rowCount) {
+      // Event déjà traité auparavant
+      return { received: true, duplicate: true };
+    }
+    try {
+      await handleStripeEvent(event);
+    } catch (e) {
       app.log.error('Webhook handler error: ' + e.message);
+      // Note : l'event est marqué comme vu mais le handler a fail.
+      // On renvoie 500 → Stripe retry. ON CONFLICT empêchera un double-traitement
+      // de la partie INSERT mais le handler tournera 2 fois — handler doit être idempotent.
       return reply.code(500).send('handler error');
     }
     return { received: true };

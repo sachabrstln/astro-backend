@@ -1,5 +1,6 @@
 // Routes auth : signup, login, me, logout, password-reset, email-verification
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 import { query, queryOne } from './db.js';
 import {
   verifyTurnstile, isPasswordPwned, generateToken, hashToken,
@@ -12,7 +13,11 @@ const EMAIL_MAX = 254;
 const PWD_MIN = 10; // renforcé pour prod publique
 const PWD_MAX = 128;
 const BCRYPT_ROUNDS = 12;
-const JWT_EXPIRES = '30d';
+// v1.3.49 (SECURITY P1-2) : 30d → 7d. Réduit la fenêtre d'exploit d'un token volé.
+// Un user qui se logge depuis Chrome reste connecté tant qu'il utilise l'extension
+// (refresh implicite via re-login auto), 7j inactif = re-login (acceptable UX).
+const JWT_EXPIRES = '7d';
+const JWT_EXPIRES_DAYS = 7;
 const LOCKOUT_THRESHOLD = 5;
 const LOCKOUT_DURATION_MIN = 30;
 const RESET_EXPIRES_MIN = 60;
@@ -89,8 +94,7 @@ async function issueSession(app, user, req) {
     { sub: user.id, email: user.email, jti },
     { expiresIn: JWT_EXPIRES }
   );
-  // 30 jours
-  const expiresAt = new Date(Date.now() + 30 * 86400 * 1000);
+  const expiresAt = new Date(Date.now() + JWT_EXPIRES_DAYS * 86400 * 1000);
   await query(
     `INSERT INTO sessions (user_id, jti, ip, user_agent, expires_at) VALUES ($1, $2, $3, $4, $5)`,
     [user.id, jti, req.ip || null, (req.headers?.['user-agent'] || '').slice(0, 500), expiresAt]
@@ -135,11 +139,21 @@ export default async function authRoutes(app) {
   // (qui était 5/15min IP+email) — celui-ci empêche le multi-trial sur la même IP
   // même avec différents emails.
   app.post('/auth/signup', signupIpLimit, async (req, reply) => {
-    const { email, password, captchaToken, acceptedTerms, acceptedTermsAt, referralCode } = req.body || {};
+    const {
+      email, password, captchaToken,
+      acceptedTerms, acceptedTermsAt,
+      waivedRightOfWithdrawal, waivedRightOfWithdrawalAt, termsVersion,
+      referralCode,
+    } = req.body || {};
 
     // v1.3.2 : acceptation explicite des CGU obligatoire (RGPD, traçabilité)
     if (acceptedTerms !== true) {
       return reply.code(400).send({ error: 'tu dois accepter les CGU et la politique de confidentialité' });
+    }
+    // v1.3.51 : renonciation expresse au droit de rétractation L221-28 13° C. conso
+    // obligatoire pour démarrer le service immédiatement (sans délai 14 jours).
+    if (waivedRightOfWithdrawal !== true) {
+      return reply.code(400).send({ error: 'tu dois confirmer la renonciation au droit de rétractation pour activer le service' });
     }
 
     // Turnstile (avec bypass extension trustée via header X-Astro-Client + secret)
@@ -193,6 +207,28 @@ export default async function authRoutes(app) {
       [cleanEmail, hash]
     );
 
+    // v1.3.51 : traçabilité légale acceptation CGU + renonciation rétractation.
+    // Stocké via audit_log (table existante, robuste, indexée user_id). Permet de
+    // produire une preuve en cas de litige client (chargeback < 14j, demande CNIL).
+    // Si tu veux migrer vers des colonnes dédiées dans users plus tard, faire
+    // un job qui rapatrie les events 'signup_consent' vers users.consent_*.
+    try {
+      await audit(
+        { user: { sub: user.id }, ip: req.ip || null, headers: req.headers || {} },
+        'signup_consent',
+        {
+          acceptedTerms: true,
+          acceptedTermsAt: acceptedTermsAt || new Date().toISOString(),
+          waivedRightOfWithdrawal: true,
+          waivedRightOfWithdrawalAt: waivedRightOfWithdrawalAt || new Date().toISOString(),
+          termsVersion: termsVersion || 'unspecified',
+        }
+      );
+    } catch (e) {
+      // Pas bloquant — l'user est créé. On log juste l'incident.
+      req.log.warn({ err: e.message, user_id: user.id }, 'audit signup_consent failed');
+    }
+
     // v1.3.8 : si code parrainage valide fourni, link filleul ← parrain
     if (validReferralCode) {
       try {
@@ -209,7 +245,8 @@ export default async function authRoutes(app) {
 
     // v1.3.9 : code à 6 chiffres au lieu d'un lien (UX plus simple, anti-bot meilleure)
     // Le code expire dans 30 min. On stocke le hash du code en DB (anti-fuite).
-    const verifCode = String(Math.floor(100000 + Math.random() * 900000)); // 100000-999999
+    // v1.3.49 (SECURITY) : crypto.randomInt (CSPRNG) au lieu de Math.random() (prédictible)
+    const verifCode = String(crypto.randomInt(100000, 1000000)); // 100000-999999
     const verifExpires = new Date(Date.now() + 30 * 60 * 1000); // 30 min
     await query(
       `INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
@@ -478,7 +515,8 @@ export default async function authRoutes(app) {
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
     if (user.email_verified) return { ok: true, alreadyVerified: true };
 
-    const verifCode = String(Math.floor(100000 + Math.random() * 900000));
+    // v1.3.49 (SECURITY) : crypto.randomInt (CSPRNG)
+    const verifCode = String(crypto.randomInt(100000, 1000000));
     const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 min
     await query(
       `INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,

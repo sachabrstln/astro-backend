@@ -6,21 +6,51 @@ import { query } from './db.js';
 // Vérifie un token Turnstile auprès de Cloudflare.
 // Configure CF_TURNSTILE_SECRET. Si absent, la vérif est désactivée (dev).
 //
-// v1.3.2 : on accepte aussi un bypass pour les requêtes provenant de l'extension
-// Chrome installée (qui n'a pas accès facile à Turnstile à cause du CSP MV3).
-// Le bypass requiert un header X-Astro-Client: extension + un secret partagé
-// EXTENSION_SHARED_SECRET. Comme l'extension est publique, ce secret est
-// considéré comme moyennement sensible — il n'empêche pas les abus mais filtre
-// le bruit, et le rate-limit par IP reste en place.
+// v1.3.49 (SECURITY) : le bypass extension est passé de "secret statique en clair"
+// à "HMAC-SHA256(secret, ts.METHOD.path)" avec timestamp valide ±5 min.
+// Le secret reste extractible du CRX MAIS un attaquant ne peut plus rejouer une
+// requête capturée (anti-replay). Doit matcher modules/api-backend.js _hmacSign().
+const HMAC_WINDOW_SEC = 5 * 60; // ±5 min
+
+function _hmacSignNode(secret, message) {
+  return crypto.createHmac('sha256', secret).update(message).digest('hex');
+}
+
+function _timingSafeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+  } catch (e) { return false; }
+}
+
+function _verifyExtensionHmac(req) {
+  if (!req || !req.headers) return false;
+  if (req.headers['x-astro-client'] !== 'extension') return false;
+  const ts = String(req.headers['x-astro-ts'] || '');
+  const sig = String(req.headers['x-astro-sig'] || '');
+  if (!ts || !sig) return false;
+  const secret = process.env.EXTENSION_SHARED_SECRET;
+  if (!secret) return false;
+  // Timestamp window check
+  const tsNum = parseInt(ts, 10);
+  if (!Number.isFinite(tsNum)) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - tsNum) > HMAC_WINDOW_SEC) return false;
+  // Reconstitue le message : ts.METHOD.path
+  const method = (req.method || 'GET').toUpperCase();
+  // req.originalUrl ou req.url selon Express version; on prend le path SANS query (path commence par /)
+  let path = req.originalUrl || req.url || '';
+  // Sécurité : strip query string pour matcher le client
+  const qIdx = path.indexOf('?');
+  if (qIdx >= 0) path = path.slice(0, qIdx);
+  const expected = _hmacSignNode(secret, ts + '.' + method + '.' + path);
+  return _timingSafeEqual(sig, expected);
+}
+
 export async function verifyTurnstile(token, remoteip, req) {
-  // Bypass extension trustée (header + secret partagé)
-  if (req && req.headers) {
-    const client = req.headers['x-astro-client'];
-    const sharedSecret = req.headers['x-astro-extension-secret'];
-    if (client === 'extension' && process.env.EXTENSION_SHARED_SECRET &&
-        sharedSecret === process.env.EXTENSION_SHARED_SECRET) {
-      return { ok: true, source: 'extension_bypass' };
-    }
+  // Bypass extension trustée via HMAC signé time-based
+  if (_verifyExtensionHmac(req)) {
+    return { ok: true, source: 'extension_hmac' };
   }
 
   const secret = process.env.CF_TURNSTILE_SECRET;

@@ -52,19 +52,33 @@ await app.register(helmet, {
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // autorise lecture cross-origin pour l'extension
 });
 
-// CORS — autorise extension Chrome + site public
+// CORS — autorise extension Chrome + site public.
+// v1.3.49 (SECURITY) : localhost retiré en prod (fuite CSRF possible si user visite
+// localhost malveillant). Restreint aussi chrome-extension:// à un allowlist d'IDs si
+// CHROME_EXTENSION_IDS est défini.
+const ALLOWED_EXTENSION_IDS = (process.env.CHROME_EXTENSION_IDS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 await app.register(cors, {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    if (origin.startsWith('chrome-extension://')) return cb(null, true);
+    if (origin.startsWith('chrome-extension://')) {
+      // Si on a un allowlist d'IDs publiés → on filtre. Sinon (dev), on accepte tout chrome-ext.
+      if (ALLOWED_EXTENSION_IDS.length === 0) return cb(null, true);
+      const extId = origin.replace('chrome-extension://', '').replace(/\/$/, '');
+      if (ALLOWED_EXTENSION_IDS.includes(extId)) return cb(null, true);
+      return cb(new Error('CORS extension ID non autorisé : ' + extId), false);
+    }
     const allowed = [
       process.env.FRONTEND_URL,
       'https://astro-pro.app',
       'https://www.astro-pro.app',
-      'http://localhost:3000',
-      'http://localhost:5173',
-    ].filter(Boolean);
-    if (allowed.includes(origin)) return cb(null, true);
+    ];
+    if (!IS_PROD) {
+      allowed.push('http://localhost:3000', 'http://localhost:5173');
+    }
+    const list = allowed.filter(Boolean);
+    if (list.includes(origin)) return cb(null, true);
     return cb(new Error('CORS bloqué pour ' + origin), false);
   },
   credentials: true,
@@ -161,15 +175,51 @@ app.decorate('authenticate', async (req, reply) => {
     return reply.code(401).send({ error: 'session révoquée' });
   }
   // v1.3.7 : refus paiement = no access (sauf routes Stripe pour payer)
-  // On laisse passer /stripe/portal et /api/stripe/cancel-subscription pour gestion
+  // v1.3.49 (SECURITY P1-1) : refus email non vérifié pour les routes payantes/IA
+  //   sur les comptes < 7 jours. Empêche un attaquant qui signup avec victim@gmail.com
+  //   de consommer la quota IA / lancer un trial sans pouvoir accéder à l'email.
   if (req.url && !req.url.startsWith('/stripe/') && !req.url.startsWith('/api/stripe/') && !req.url.startsWith('/auth/')) {
-    const u = await queryOne('SELECT plan_status FROM users WHERE id = $1', [userId]);
+    const u = await queryOne(
+      'SELECT plan_status, email_verified, created_at FROM users WHERE id = $1',
+      [userId]
+    );
     if (u && u.plan_status === 'past_due') {
       return reply.code(402).send({
         error: 'paiement_requis',
         reason: 'past_due',
         message: 'Ton dernier paiement a échoué. Va dans Support → Mon abonnement → Factures pour mettre à jour ta carte.'
       });
+    }
+    // Email gating : routes critiques bloquées si email pas vérifié sur compte récent
+    if (u && u.email_verified === false) {
+      const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86400000;
+      if (ageDays < 7) {
+        const critical = /^\/api\/(ai|clipboard)\//.test(req.url) || req.url.startsWith('/referral/');
+        if (critical) {
+          return reply.code(403).send({
+            error: 'email_non_verifie',
+            reason: 'verify_email_required',
+            message: 'Vérifie ton email pour utiliser cette fonctionnalité. Code envoyé à ton adresse.'
+          });
+        }
+      }
+    }
+  }
+  // Stripe trial gating : email obligatoire avant de pouvoir start un trial 7j
+  if (req.url && (req.url === '/stripe/start-trial' || req.url === '/stripe/create-checkout-session')) {
+    const u = await queryOne(
+      'SELECT email_verified, created_at FROM users WHERE id = $1',
+      [userId]
+    );
+    if (u && u.email_verified === false) {
+      const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86400000;
+      if (ageDays < 7) {
+        return reply.code(403).send({
+          error: 'email_non_verifie',
+          reason: 'verify_email_required',
+          message: 'Vérifie d\'abord ton email pour activer ton abonnement.'
+        });
+      }
     }
   }
   if (new Date(session.expires_at) < new Date()) {

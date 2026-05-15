@@ -27,6 +27,15 @@ import { audit } from './security.js';
 const IS_PROD = process.env.NODE_ENV === 'production';
 const REPLICATE_API_BASE = 'https://api.replicate.com/v1';
 
+// v1.3.49 (SECURITY) : timeout obligatoire sur tous les fetch sortants vers Replicate
+// pour éviter qu'un Replicate qui hang n'épuise le pool DB du backend.
+const REPLICATE_FETCH_TIMEOUT_MS = 15_000; // 15s — création + polling individuel
+const REPLICATE_DOWNLOAD_TIMEOUT_MS = 30_000; // 30s — DL image résultat
+function _replicateFetch(url, opts = {}, timeoutMs = REPLICATE_FETCH_TIMEOUT_MS) {
+  // AbortSignal.timeout est dispo en Node 18+ (Fastify 4 = Node 18+).
+  return fetch(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 // Modèle par défaut : 851-labs/background-remover (bon ratio qualité/prix
 // sur Replicate, ~$0.0015/run). Pour passer en premium (Bria 2.0, ~$0.05/run)
 // override via REPLICATE_BG_MODEL=bria/rmbg-2.0 sur Render.
@@ -69,7 +78,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
   // latest_version.id, puis POST /v1/predictions avec version explicite.
   let latestVersion;
   try {
-    const modelInfoRes = await fetch(`${REPLICATE_API_BASE}/models/${DEFAULT_MODEL}`, {
+    const modelInfoRes = await _replicateFetch(`${REPLICATE_API_BASE}/models/${DEFAULT_MODEL}`, {
       headers: { 'Authorization': `Bearer ${token}` },
     });
     if (!modelInfoRes.ok) {
@@ -98,7 +107,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
   const createUrl = `${REPLICATE_API_BASE}/predictions`;
   let createRes;
   try {
-    createRes = await fetch(createUrl, {
+    createRes = await _replicateFetch(createUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -141,7 +150,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
     const pollUrl = prediction?.urls?.get;
     if (!pollUrl) break;
     try {
-      const pollRes = await fetch(pollUrl, {
+      const pollRes = await _replicateFetch(pollUrl, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       if (pollRes.ok) prediction = await pollRes.json();
@@ -164,7 +173,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
 
   let imgRes;
   try {
-    imgRes = await fetch(outputUrl);
+    imgRes = await _replicateFetch(outputUrl, {}, REPLICATE_DOWNLOAD_TIMEOUT_MS);
   } catch (e) {
     const err = new Error('replicate_output_fetch');
     err.detail = e.message;
@@ -213,7 +222,7 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
   // Récup latest version du modèle relight
   let latestVersion;
   try {
-    const r = await fetch(`${REPLICATE_API_BASE}/models/${RELIGHT_MODEL}`, {
+    const r = await _replicateFetch(`${REPLICATE_API_BASE}/models/${RELIGHT_MODEL}`, {
       headers: { 'Authorization': `Bearer ${token}` },
     });
     if (!r.ok) {
@@ -238,7 +247,7 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
   // directement la sortie finale.
   let createRes;
   try {
-    createRes = await fetch(`${REPLICATE_API_BASE}/predictions`, {
+    createRes = await _replicateFetch(`${REPLICATE_API_BASE}/predictions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -284,7 +293,7 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
     const pollUrl = prediction?.urls?.get;
     if (!pollUrl) break;
     try {
-      const pr = await fetch(pollUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+      const pr = await _replicateFetch(pollUrl, { headers: { 'Authorization': `Bearer ${token}` } });
       if (pr.ok) prediction = await pr.json();
     } catch (_) { /* retry */ }
   }
@@ -299,7 +308,7 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
   const url = Array.isArray(out) ? out[0] : (typeof out === 'string' ? out : null);
   if (!url) throw new Error('replicate_relight_no_output');
 
-  const imgRes = await fetch(url);
+  const imgRes = await _replicateFetch(url, {}, REPLICATE_DOWNLOAD_TIMEOUT_MS);
   if (!imgRes.ok) throw new Error(`relight_output_fetch_${imgRes.status}`);
   const arrayBuf = await imgRes.arrayBuffer();
   const buf = Buffer.from(arrayBuf);
