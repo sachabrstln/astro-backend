@@ -16,9 +16,11 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 // Le branding user-facing est "IA Astro" / "IA Astro+" — on n'expose JAMAIS
 // "Sonnet" ou "Haiku" dans les messages d'erreur ou réponses API.
 // ──────────────────────────────────────────────────────────────────────────
+// v1.3.53 (BUG FIX) : Sonnet sans datestamp = ID invalide → 404 Anthropic → erreur "API IA"
+// affichée à l'user comme "ne reconnait pas l'IA". Datestamp Sonnet 4.5 = 2025-09-29.
 const MODEL_IDS = {
   haiku:  'claude-haiku-4-5-20251001',
-  sonnet: 'claude-sonnet-4-5',
+  sonnet: 'claude-sonnet-4-5-20250929',
 };
 const MODEL_PRICING = {
   // Prix Anthropic en USD par 1M tokens (input, output)

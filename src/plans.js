@@ -107,11 +107,10 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_ULTRA_ANNUAL',
     maxAccounts: 10,             // multi-comptes Ultra-only
     seoMonthly: Infinity,
-    // Multipost IA : 20 swaps/mois inclus = ~4 annonces × 5 photos.
-    // Au-delà → l'user doit acheter des packs (4€/8€/20€) — c'est l'upsell.
-    // Volume conservateur pour préserver la marge sur les power users (qui
-    // restent profitables grâce aux packs additionnels).
-    bgSwapMonthly: 20,
+    // v1.3.54 : 20 → 100 swaps/mois = ~20 annonces × 5 photos. Les packs additionnels
+    // restent l'upsell pour les power-users (>100 annonces/mois). Avec 20, l'user
+    // saturait au 4ème copier-coller — frustrant et empêche d'évaluer la valeur.
+    bgSwapMonthly: 100,
     popular: true,               // badge "Recommandé" déplacé sur Ultra
     socialProof: '4 vendeurs sur 5 le choisissent',
     features: {
