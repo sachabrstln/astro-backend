@@ -372,12 +372,17 @@ export default async function clipboardRoutes(app) {
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
 
+    // v1.3.701 : DEV_MODE_BYPASS_PLAN — si la env var ASTRO_DEV_BYPASS_PLAN=1
+    // est set sur Render, on bypass la vérif plan et on traite l'user comme Ultra
+    // illimité (pour tests internes). NE PAS ACTIVER EN PROD avec users payants.
+    const DEV_BYPASS = process.env.ASTRO_DEV_BYPASS_PLAN === '1';
+
     // v1.3.7 : Multipost IA = upsell pour users abonnés. Pas d'accès sans
     // abonnement actif, même avec un pack en stock (les packs sont un
     // complément, pas un substitut d'abo).
     const planDef = PLANS[user.plan] || {};
-    const monthlyLimit = planDef.bgSwapMonthly || 0;
-    const subActive = user.plan_status === 'active'
+    const monthlyLimit = DEV_BYPASS ? Infinity : (planDef.bgSwapMonthly || 0);
+    const subActive = DEV_BYPASS || user.plan_status === 'active'
                    || user.plan_status === 'trialing'
                    || user.plan_status === 'active_cancelling';
 
@@ -742,12 +747,14 @@ export default async function clipboardRoutes(app) {
     );
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
 
+    // v1.3.701 : DEV_BYPASS — si ASTRO_DEV_BYPASS_PLAN=1, retourne limite illimitée
+    const DEV_BYPASS = process.env.ASTRO_DEV_BYPASS_PLAN === '1';
     const planDef = PLANS[user.plan] || {};
-    const monthlyLimit = planDef.bgSwapMonthly || 0;
+    const monthlyLimit = DEV_BYPASS ? Infinity : (planDef.bgSwapMonthly || 0);
     const limitOut = monthlyLimit === Infinity ? null : monthlyLimit;
 
     let used = 0;
-    if (monthlyLimit > 0) {
+    if (monthlyLimit > 0 && monthlyLimit !== Infinity) {
       used = await getMonthlyUsage(user.id);
     }
 
