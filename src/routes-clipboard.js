@@ -36,10 +36,10 @@ function _replicateFetch(url, opts = {}, timeoutMs = REPLICATE_FETCH_TIMEOUT_MS)
   return fetch(url, { ...opts, signal: AbortSignal.timeout(timeoutMs) });
 }
 
-// Modèle par défaut : 851-labs/background-remover (bon ratio qualité/prix
-// sur Replicate, ~$0.0015/run). Pour passer en premium (Bria 2.0, ~$0.05/run)
-// override via REPLICATE_BG_MODEL=bria/rmbg-2.0 sur Render.
-const DEFAULT_MODEL = process.env.REPLICATE_BG_MODEL || '851-labs/background-remover';
+// v1.3.701 : SWITCH model — 851-labs/background-remover retourne 422 depuis qq jours
+// (probablement deprecated/schema changed). On passe à cjwbw/rembg qui est stable
+// depuis 3 ans, même ratio qualité/prix (~$0.001/run). Bria 2.0 reste override possible.
+const DEFAULT_MODEL = process.env.REPLICATE_BG_MODEL || 'cjwbw/rembg';
 
 // v1.3.10 : relight model. IC-Light Background (background-conditioned variant)
 // re-rend la lumière du sujet pour qu'elle matche celle du fond choisi.
