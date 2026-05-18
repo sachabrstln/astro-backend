@@ -29,7 +29,7 @@ const REPLICATE_API_BASE = 'https://api.replicate.com/v1';
 
 // v1.3.49 (SECURITY) : timeout obligatoire sur tous les fetch sortants vers Replicate
 // pour éviter qu'un Replicate qui hang n'épuise le pool DB du backend.
-const REPLICATE_FETCH_TIMEOUT_MS = 15_000; // 15s — création + polling individuel
+const REPLICATE_FETCH_TIMEOUT_MS = 45_000; // v1.3.7 : 15s → 45s pour absorber cold start Replicate (création prédiction lente sur 1er run)
 const REPLICATE_DOWNLOAD_TIMEOUT_MS = 30_000; // 30s — DL image résultat
 function _replicateFetch(url, opts = {}, timeoutMs = REPLICATE_FETCH_TIMEOUT_MS) {
   // AbortSignal.timeout est dispo en Node 18+ (Fastify 4 = Node 18+).
@@ -112,7 +112,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'Prefer': 'wait=60',
+        'Prefer': 'wait=90',
       },
       body: JSON.stringify({ version: latestVersion, input: { image: dataUrl } }),
     });
@@ -253,7 +253,7 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'Prefer': 'wait=60',
+        'Prefer': 'wait=90',
       },
       body: JSON.stringify({
         version: latestVersion,
