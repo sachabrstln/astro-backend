@@ -137,9 +137,10 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
     throw new Error('replicate_bad_json');
   }
 
-  // Étape 2 : si Prefer:wait n'a pas eu le temps, polling jusqu'à 60s total
+  // v1.3.7 : si Prefer:wait n'a pas eu le temps, polling jusqu'à 120s total
+  // (cold start Replicate peut prendre 60-90s sur le 1er call après inactivité)
   const POLL_INTERVAL_MS = 1500;
-  const MAX_TOTAL_MS = 60000;
+  const MAX_TOTAL_MS = 120000;
   while (
     prediction.status !== 'succeeded' &&
     prediction.status !== 'failed' &&
