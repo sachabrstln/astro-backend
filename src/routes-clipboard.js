@@ -112,7 +112,7 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'Prefer': 'wait=90',
+        'Prefer': 'wait=60',
       },
       body: JSON.stringify({ version: latestVersion, input: { image: dataUrl } }),
     });
@@ -253,7 +253,7 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'Prefer': 'wait=90',
+        'Prefer': 'wait=60',
       },
       body: JSON.stringify({
         version: latestVersion,
