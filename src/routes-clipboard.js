@@ -549,7 +549,8 @@ export default async function clipboardRoutes(app) {
       return reply.code(502).send({
         error: 'erreur API détourage',
         code: safeCode ? safeCode[0] : 'unknown',
-        detail: IS_PROD ? undefined : (e.detail || e.message),
+        detail: e.detail || e.message,
+        statusCode: e.statusCode || null,
       });
     }
   });
