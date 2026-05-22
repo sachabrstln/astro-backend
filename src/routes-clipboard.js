@@ -112,7 +112,11 @@ async function removeBackgroundReplicate(imageBase64, mediaType, log) {
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'Prefer': 'wait=60',
+        // v1.3.722 : wait DOIT être < REPLICATE_FETCH_TIMEOUT_MS (45s) sinon le
+        // client abort la connexion avant que Replicate réponde → replicate_network.
+        // On garde une marge : wait=30 < 45s. Si la prédiction n'est pas finie en
+        // 30s, on bascule sur le polling ci-dessous (jusqu'à MAX_TOTAL_MS).
+        'Prefer': 'wait=30',
       },
       body: JSON.stringify({ version: latestVersion, input: { image: dataUrl } }),
     });
@@ -253,7 +257,12 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'Prefer': 'wait=60',
+        // v1.3.722 (FIX relight replicate_network) : IC-Light est lent (~34s warm,
+        // 60-90s cold). Avec wait=60 et un client timeout de 45s, le fetch était
+        // ABORT avant la réponse → replicate_network → fallback compositing local
+        // (= le Mode Studio ne faisait jamais le vrai relight IA). On passe wait=30
+        // (< 45s) : la prédiction démarre, puis le polling ci-dessous attend la fin.
+        'Prefer': 'wait=30',
       },
       body: JSON.stringify({
         version: latestVersion,
@@ -282,7 +291,9 @@ async function relightSubjectOnBackground(subjectPngB64, backgroundB64, backgrou
 
   let prediction = await createRes.json();
   const POLL_INTERVAL_MS = 1500;
-  const MAX_TOTAL_MS = 90000; // relight peut être plus lent que le bg-remove
+  // v1.3.722 : 90s → 120s. IC-Light cold start peut dépasser 90s ; on aligne sur
+  // le budget bg-swap pour ne pas couper une prédiction qui aurait abouti.
+  const MAX_TOTAL_MS = 120000;
 
   while (
     prediction.status !== 'succeeded' &&
