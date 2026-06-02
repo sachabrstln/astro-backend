@@ -356,6 +356,33 @@ async function grantPackCredits(session) {
   );
 }
 
+// v1.3.724 : résout l'user à partir d'un objet Stripe (subscription/invoice) même si
+// metadata.user_id manque (selon la version d'API Stripe, subscription_details.metadata
+// n'est pas toujours propagé). Fallback DB par stripe_subscription_id puis
+// stripe_customer_id (tous deux stockés sur users) → la commission parrain est bien
+// stoppée à l'annulation et le statut bien mis à jour même sans metadata.
+async function resolveStripeUserId(obj) {
+  const fromMeta = parseInt(
+    (obj && obj.metadata && obj.metadata.user_id) ||
+    (obj && obj.subscription_details && obj.subscription_details.metadata && obj.subscription_details.metadata.user_id) ||
+    '0', 10
+  );
+  if (fromMeta) return fromMeta;
+  const subId = (obj && typeof obj.id === 'string' && obj.id.startsWith('sub_'))
+    ? obj.id
+    : (obj && obj.subscription) || null;
+  if (subId) {
+    const u = await queryOne('SELECT id FROM users WHERE stripe_subscription_id = $1', [subId]);
+    if (u) return u.id;
+  }
+  const custId = (obj && obj.customer) || null;
+  if (custId) {
+    const u = await queryOne('SELECT id FROM users WHERE stripe_customer_id = $1', [custId]);
+    if (u) return u.id;
+  }
+  return 0;
+}
+
 async function handleStripeEvent(event) {
   const obj = event.data.object;
   switch (event.type) {
@@ -369,7 +396,7 @@ async function handleStripeEvent(event) {
     }
     case 'customer.subscription.created':
     case 'customer.subscription.updated': {
-      const userId = parseInt(obj.metadata?.user_id || '0', 10);
+      const userId = await resolveStripeUserId(obj);
       if (!userId) return;
       const priceId = obj.items?.data?.[0]?.price?.id;
       const { plan, billing } = priceIdToPlan(priceId);
@@ -402,7 +429,7 @@ async function handleStripeEvent(event) {
       // v1.3.2 : appelé SEULEMENT quand le subscription expire vraiment
       // (à plan_expires_at, après que Stripe ait honoré la période payée).
       // Pas de coupure brutale : si user a résilié il y a 3 jours, il a déjà eu accès jusque là.
-      const userId = parseInt(obj.metadata?.user_id || '0', 10);
+      const userId = await resolveStripeUserId(obj);
       if (!userId) return;
       await query(
         `UPDATE users SET plan = 'none', plan_status = 'inactive', plan_expires_at = NULL,
@@ -482,7 +509,7 @@ async function handleStripeEvent(event) {
     }
     case 'invoice.paid': {
       // 1er paiement après trial OU renouvellement → user devient 'active'
-      const userId = parseInt(obj.subscription_details?.metadata?.user_id || '0', 10);
+      const userId = await resolveStripeUserId(obj);
       if (userId && (obj.billing_reason === 'subscription_cycle' || obj.billing_reason === 'subscription_create')) {
         await query(
           `UPDATE users SET plan_status = 'active' WHERE id = $1 AND plan_status IN ('trialing', 'past_due')`,
@@ -511,7 +538,7 @@ async function handleStripeEvent(event) {
       // sur un renouvellement (cycle), on cancel IMMÉDIATEMENT la subscription.
       // Pas de "past_due" + retry smart : payment failed = abonnement terminé.
       // L'utilisateur devra refaire un signup s'il veut revenir.
-      const userId = parseInt(obj.subscription_details?.metadata?.user_id || '0', 10);
+      const userId = await resolveStripeUserId(obj);
       const subId = obj.subscription;
       if (!userId) break;
       try {
@@ -603,7 +630,7 @@ async function handleStripeEvent(event) {
     // de la subscription vers le target_plan choisi par l'user au signup.
     case 'customer.subscription.trial_will_end': {
       try {
-        const userId = parseInt(obj.metadata?.user_id || '0', 10);
+        const userId = await resolveStripeUserId(obj);
         if (!userId) break;
         const u = await queryOne(
           `SELECT id, target_plan, target_billing, referred_by_code FROM users WHERE id = $1`,
