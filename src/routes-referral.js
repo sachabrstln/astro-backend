@@ -350,17 +350,25 @@ export default async function referralRoutes(app) {
       });
     }
 
-    // Lock optimiste : on créé d'abord le payout en DB, puis on tente le transfer Stripe.
-    // Si Stripe échoue, on rollback.
+    // v1.3.724 : débit ATOMIQUE et conditionnel AVANT toute opération Stripe.
+    // WHERE cagnotte >= balance empêche deux retraits concurrents de payer 2×
+    // (le 2e ne débite rien → 409). SET = cagnotte - balance (et pas "= 0") préserve
+    // une commission créditée entre la lecture du solde et le débit.
+    const debited = await queryOne(
+      `UPDATE users SET cagnotte_balance_cents = cagnotte_balance_cents - $2
+       WHERE id = $1 AND cagnotte_balance_cents >= $2
+       RETURNING id`,
+      [userId, balance]
+    );
+    if (!debited) {
+      return reply.code(409).send({ error: 'retrait déjà en cours ou solde modifié — réessaie' });
+    }
+
+    // Débit acté → on enregistre le payout, puis on tente le transfer Stripe.
+    // Si Stripe échoue, la cagnotte est re-créditée (rollback dans le catch).
     const payoutRow = await queryOne(
       `INSERT INTO payouts (user_id, amount_cents, status) VALUES ($1, $2, 'pending') RETURNING id`,
       [userId, balance]
-    );
-
-    // Débite la cagnotte (à rollback si erreur)
-    await query(
-      `UPDATE users SET cagnotte_balance_cents = 0 WHERE id = $1`,
-      [userId]
     );
 
     try {
