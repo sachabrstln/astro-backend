@@ -386,7 +386,7 @@ export default async function clipboardRoutes(app) {
     // v1.3.701 : DEV_MODE_BYPASS_PLAN — si la env var ASTRO_DEV_BYPASS_PLAN=1
     // est set sur Render, on bypass la vérif plan et on traite l'user comme Ultra
     // illimité (pour tests internes). NE PAS ACTIVER EN PROD avec users payants.
-    const DEV_BYPASS = process.env.ASTRO_DEV_BYPASS_PLAN === '1';
+    const DEV_BYPASS = process.env.NODE_ENV !== 'production' && process.env.ASTRO_DEV_BYPASS_PLAN === '1';
 
     // v1.3.7 : Multipost IA = upsell pour users abonnés. Pas d'accès sans
     // abonnement actif, même avec un pack en stock (les packs sont un
@@ -742,7 +742,17 @@ export default async function clipboardRoutes(app) {
       }
     }
 
-    // Pas de pack avec assez de crédits → fallback Ultra (subActive déjà checké)
+    // Pas de pack avec assez de crédits → fallback abonnement, mais SEULEMENT pour
+    // les plans qui incluent un quota Multipost mensuel (Ultra). Starter/Pro
+    // (bgSwapMonthly=0) n'ont pas Multipost inclus : sans pack, on refuse au lieu
+    // d'accorder une annonce gratuite (bypass plan).
+    const includedMonthly = (PLANS[user.plan]?.bgSwapMonthly || 0);
+    if (includedMonthly <= 0) {
+      return reply.code(402).send({
+        error: 'credits_insuffisants',
+        hint: 'Achete un pack Multipost IA pour publier des annonces',
+      });
+    }
     return { ok: true, source: 'subscription', remaining: null, cost };
   });
 
@@ -760,7 +770,7 @@ export default async function clipboardRoutes(app) {
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
 
     // v1.3.701 : DEV_BYPASS — si ASTRO_DEV_BYPASS_PLAN=1, retourne limite illimitée
-    const DEV_BYPASS = process.env.ASTRO_DEV_BYPASS_PLAN === '1';
+    const DEV_BYPASS = process.env.NODE_ENV !== 'production' && process.env.ASTRO_DEV_BYPASS_PLAN === '1';
     const planDef = PLANS[user.plan] || {};
     const monthlyLimit = DEV_BYPASS ? Infinity : (planDef.bgSwapMonthly || 0);
     const limitOut = monthlyLimit === Infinity ? null : monthlyLimit;

@@ -308,8 +308,8 @@ export default async function stripeRoutes(app) {
       // DB indispo → demande à Stripe de retenter
       return reply.code(500).send('db error');
     }
-    if (!inserted?.rowCount) {
-      // Event déjà traité auparavant
+    if (!inserted || inserted.length === 0) {
+      // Event déjà traité auparavant (query() renvoie un array de rows, pas un objet pg)
       return { received: true, duplicate: true };
     }
     try {

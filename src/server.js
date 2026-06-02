@@ -287,12 +287,6 @@ app.get('/health', async () => ({
   uptime_s: Math.round(process.uptime()),
   sentry: !!Sentry,
   ts: new Date().toISOString(),
-  // v1.3.702 (DEBUG) : expose le modèle Replicate pour confirmer quel modèle
-  // est actuellement actif sur Render. Si différent de la valeur committée
-  // dans routes-clipboard.js, c'est qu'une env var REPLICATE_BG_MODEL surcharge.
-  bg_model: process.env.REPLICATE_BG_MODEL || 'cjwbw/rembg (default)',
-  dev_bypass: process.env.ASTRO_DEV_BYPASS_PLAN === '1',
-  replicate_token: !!process.env.REPLICATE_API_TOKEN,
 }));
 
 // Routes
