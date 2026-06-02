@@ -478,10 +478,29 @@ export default async function authRoutes(app) {
     if (normalized.length === 0) return reply.code(400).send({ error: 'code invalide' });
 
     const tokenHash = hashToken(normalized);
-    // v1.3.9 : si email fourni, on filtre par user_id pour éviter qu'un mauvais code
-    // matche par hasard un autre user (edge case mais propre).
+    // v1.3.724 (SECURITY) : un code 6 chiffres est un secret FAIBLE (~900k combos).
+    // Il ne doit JAMAIS être matché globalement (sinon un attaquant peut, par
+    // brute-force + rotation d'IP, vérifier un compte arbitraire parmi tous les codes
+    // actifs et contourner le gating email anti-fraude). Donc :
+    //   - code court (6 chiffres)  → email OBLIGATOIRE, lookup scopé au user.
+    //   - token long (lien email)  → haute entropie, lookup global sûr (collision
+    //                                 infaisable) → préserve verify-email.html.
+    const isShortCode = /^[0-9]{4,8}$/.test(normalized);
+    const emailValid = email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
     let verif;
-    if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (isShortCode) {
+      if (!emailValid) {
+        return reply.code(400).send({ error: 'email requis pour valider le code' });
+      }
+      const u = await queryOne(`SELECT id FROM users WHERE email = $1`, [email.toLowerCase().trim()]);
+      if (u) {
+        verif = await queryOne(
+          `SELECT id, user_id, expires_at, used_at FROM email_verifications
+           WHERE token_hash = $1 AND user_id = $2 ORDER BY id DESC LIMIT 1`,
+          [tokenHash, u.id]
+        );
+      }
+    } else if (emailValid) {
       const u = await queryOne(`SELECT id FROM users WHERE email = $1`, [email.toLowerCase().trim()]);
       if (u) {
         verif = await queryOne(

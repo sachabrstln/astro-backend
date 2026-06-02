@@ -257,7 +257,7 @@ export default async function stripeRoutes(app) {
       return { ok: true };
     } catch (e) {
       app.log.error('Cancel subscription failed: ' + e.message);
-      return reply.code(500).send({ error: 'cancel failed', detail: e.message });
+      return reply.code(500).send({ error: 'cancel failed', detail: process.env.NODE_ENV === 'production' ? undefined : e.message });
     }
   });
 
@@ -274,7 +274,7 @@ export default async function stripeRoutes(app) {
       return { ok: true };
     } catch (e) {
       app.log.error('Reactivate failed: ' + e.message);
-      return reply.code(500).send({ error: 'reactivate failed', detail: e.message });
+      return reply.code(500).send({ error: 'reactivate failed', detail: process.env.NODE_ENV === 'production' ? undefined : e.message });
     }
   });
 

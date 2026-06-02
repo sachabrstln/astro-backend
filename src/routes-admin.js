@@ -72,7 +72,7 @@ export default async function adminRoutes(app) {
       };
     } catch (err) {
       req.log.error({ err }, 'admin/stats failed');
-      return reply.code(500).send({ error: 'stats failed', detail: err.message });
+      return reply.code(500).send({ error: 'stats failed', detail: process.env.NODE_ENV === 'production' ? undefined : err.message });
     }
   });
 
@@ -101,7 +101,7 @@ export default async function adminRoutes(app) {
       return { users, total: totalRow?.n || 0, limit, offset };
     } catch (err) {
       req.log.error({ err }, 'admin/users failed');
-      return reply.code(500).send({ error: 'users failed', detail: err.message });
+      return reply.code(500).send({ error: 'users failed', detail: process.env.NODE_ENV === 'production' ? undefined : err.message });
     }
   });
 
