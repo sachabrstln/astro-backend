@@ -66,7 +66,7 @@ export default async function stripeRoutes(app) {
   // les fonctionnalités Ultra pendant 7 jours, peu importe le plan choisi.
   // À J-3 du fin de trial (webhook trial_will_end), on swap le price Stripe vers
   // le target_plan choisi. À J+7, Stripe charge le 1er paiement du plan target.
-  // Si referred_by_code est défini, on applique aussi le coupon -15% sur la 1ère facture.
+  // Si referred_by_code est défini, on applique aussi le coupon -20% sur la 1ère facture.
   app.post('/stripe/start-trial', { onRequest: [app.authenticate] }, async (req, reply) => {
     const billing = (req.body?.billing === 'annual') ? 'annual' : 'monthly';
     const targetPlan = ['starter', 'pro', 'ultra'].includes(req.body?.targetPlan)
@@ -140,7 +140,7 @@ export default async function stripeRoutes(app) {
         // 7 jours d'essai → charge automatique au J+7 sur le target_plan
         trial_period_days: 7,
         // Stripe émet customer.subscription.trial_will_end 3 jours avant la fin du trial
-        // → le webhook swap le price vers target_plan + applique coupon -15% si filleul
+        // → le webhook swap le price vers target_plan + applique coupon -20% si filleul
         trial_settings: {
           end_behavior: { missing_payment_method: 'cancel' }
         },
@@ -667,19 +667,27 @@ async function handleStripeEvent(event) {
         if (!currentItem) break;
         // Si déjà sur le bon price, rien à faire
         if (currentItem.price.id === targetPriceId) break;
-        // Swap le price (sans proration, prend effet à la fin du trial)
-        const updateParams = {
+        // Swap le price (sans proration, prend effet à la fin du trial). CRITIQUE :
+        // doit réussir indépendamment du coupon filleul.
+        await stripe.subscriptions.update(obj.id, {
           items: [{ id: currentItem.id, price: targetPriceId }],
           proration_behavior: 'none',
-        };
-        // Applique le coupon -15% sur la 1ère facture si filleul
-        if (u.referred_by_code) {
-          // On utilise un coupon Stripe pré-créé "ASTRO_REFERRAL_15"
-          // (à créer manuellement dans Stripe Dashboard → Products → Coupons)
-          updateParams.discounts = [{ coupon: 'ASTRO_REFERRAL_15' }];
-        }
-        await stripe.subscriptions.update(obj.id, updateParams);
+        });
         console.log(`[trial_will_end] swapped user ${userId} to ${targetPlan}/${targetBilling}`);
+        // v1.3.725 : coupon filleul -20% sur la 1ère facture (best-effort). Avant : 15%,
+        // et un coupon manquant cassait TOUT le swap. Désormais appliqué APRÈS le swap
+        // dans son propre try → un coupon absent ne bloque plus l'activation du plan.
+        // ⚠️ Créer dans Stripe Dashboard → Coupons un coupon 20% off, duration=once,
+        //    d'id STRIPE_REFERRAL_COUPON (défaut 'ASTRO_REFERRAL_20').
+        if (u.referred_by_code) {
+          const couponId = process.env.STRIPE_REFERRAL_COUPON || 'ASTRO_REFERRAL_20';
+          try {
+            await stripe.subscriptions.update(obj.id, { discounts: [{ coupon: couponId }] });
+            console.log(`[trial_will_end] coupon filleul ${couponId} appliqué (user ${userId})`);
+          } catch (e) {
+            console.warn(`[trial_will_end] coupon filleul ${couponId} non appliqué: ${e.message}`);
+          }
+        }
       } catch (e) {
         console.error('[trial_will_end] swap failed', e.message);
       }
