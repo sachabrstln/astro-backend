@@ -201,10 +201,10 @@ export default async function authRoutes(app) {
     // en mode subscription avec trial_period_days=7. À J+7, charge automatique du plan Ultra
     // sauf s'il a résilié dans son espace abonnement avant.
     const [user] = await query(
-      `INSERT INTO users (email, password_hash, plan, plan_status, email_verified)
-       VALUES ($1, $2, 'none', 'inactive', FALSE)
+      `INSERT INTO users (email, password_hash, plan, plan_status, email_verified, signup_ip)
+       VALUES ($1, $2, 'none', 'inactive', FALSE, $3)
        RETURNING id, email, plan, plan_status, email_verified`,
-      [cleanEmail, hash]
+      [cleanEmail, hash, req.ip || null]
     );
 
     // v1.3.51 : traçabilité légale acceptation CGU + renonciation rétractation.

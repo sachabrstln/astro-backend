@@ -525,7 +525,12 @@ async function handleStripeEvent(event) {
           // Crédite la commission parrain (mois 1, 2, 3, 4 du filleul)
           if (ref.creditCommissionForPayment) {
             const amountPaidCents = obj.amount_paid || 0;
-            await ref.creditCommissionForPayment(userId, amountPaidCents);
+            // v1.3.725 : intervalle de facturation (month/year) → prorata annuel côté
+            // commission (sinon 1 facture annuelle = 30% d'une année entière).
+            const billingInterval = obj.lines?.data?.[0]?.price?.recurring?.interval
+                                 || obj.lines?.data?.[0]?.plan?.interval
+                                 || null;
+            await ref.creditCommissionForPayment(userId, amountPaidCents, billingInterval);
           }
         } catch (e) {
           console.error('[invoice.paid commission]', e.message);

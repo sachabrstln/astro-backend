@@ -72,7 +72,7 @@ export async function activateReferralOnFirstPayment(refereeUserId) {
 
 // Calcule + crédite la commission au parrain pour un paiement filleul
 // Appelé depuis webhook invoice.paid (mois 1, 2, 3, 4 du filleul).
-export async function creditCommissionForPayment(refereeUserId, amountPaidCents) {
+export async function creditCommissionForPayment(refereeUserId, amountPaidCents, billingInterval) {
   const ref = await queryOne(
     `SELECT id, referrer_user_id, commission_paid_count, status
      FROM referrals WHERE referee_user_id = $1 AND status = 'active'`,
@@ -81,16 +81,27 @@ export async function creditCommissionForPayment(refereeUserId, amountPaidCents)
   if (!ref) return null;
   if (ref.commission_paid_count >= COMMISSION_MONTHS) return null; // déjà 4 mois payés
 
-  const commissionCents = Math.round(amountPaidCents * COMMISSION_PCT / 100);
-  // Update referral
-  await query(
+  // v1.3.725 : le cap est "4 MOIS" mais amountPaidCents = montant de la facture entière.
+  // Pour un filleul ANNUEL, une facture = 12 mois → sans prorata on crédite 30% d'une
+  // année entière, et comme il n'y a qu'1 facture/an le cap par-facture ne se déclenche
+  // jamais. On ramène donc au mois-équivalent pour les factures annuelles.
+  const isAnnual = (billingInterval === 'year' || billingInterval === 'annual');
+  const monthlyEquivCents = isAnnual ? Math.round(amountPaidCents / 12) : amountPaidCents;
+  const commissionCents = Math.round(monthlyEquivCents * COMMISSION_PCT / 100);
+
+  // v1.3.725 : incrément ATOMIQUE auto-gardé (WHERE commission_paid_count < cap). Évite
+  // qu'un crédit dépasse le cap si deux invoice.paid concurrents lisent le même count.
+  // On ne crédite la cagnotte QUE si l'UPDATE a bien incrémenté (RETURNING).
+  const upd = await queryOne(
     `UPDATE referrals SET
        commission_paid_count = commission_paid_count + 1,
        parrain_commission_total_cents = parrain_commission_total_cents + $1,
        parrain_commission_total_eur = (parrain_commission_total_cents + $1) / 100.0
-     WHERE id = $2`,
-    [commissionCents, ref.id]
+     WHERE id = $2 AND commission_paid_count < $3
+     RETURNING id`,
+    [commissionCents, ref.id, COMMISSION_MONTHS]
   );
+  if (!upd) return null; // cap atteint entre le SELECT et l'UPDATE → pas de double crédit
   // Crédit cagnotte parrain
   await query(
     `UPDATE users SET
