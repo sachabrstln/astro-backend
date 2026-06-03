@@ -444,6 +444,18 @@ async function handleStripeEvent(event) {
       } catch (e) {}
       break;
     }
+    case 'charge.refunded': {
+      // v1.3.725 : un remboursement d'un filleul STOPPE la commission parrain (plus de
+      // crédit futur). Le clawback du déjà-crédité reste une décision produit (non
+      // automatisé ici). ⚠️ Nécessite que l'event charge.refunded soit activé sur Stripe.
+      const userId = await resolveStripeUserId(obj);
+      if (!userId) break;
+      try {
+        const ref = await import('./routes-referral.js');
+        if (ref.stopReferralOnCancellation) await ref.stopReferralOnCancellation(userId);
+      } catch (e) {}
+      break;
+    }
     case 'payment_method.attached': {
       // v1.3.7 : capture le card.fingerprint pour anti-fraude trial
       // v1.3.7 — Anti-fraude F : bloque les cartes prépayées éphémères
