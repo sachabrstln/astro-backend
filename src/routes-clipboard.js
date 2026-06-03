@@ -354,6 +354,19 @@ async function getMonthlyUsage(userId) {
   return rows?.[0]?.count || 0;
 }
 
+// v1.3.725 : compte les ANNONCES Multipost consommées ce mois via le quota abonnement
+// (Ultra). Le quota mensuel est désormais compté PAR ANNONCE publiée (claim-annonce-credit),
+// pas par photo détourée. 1 ligne ai_usage kind='multipost-annonce' = 1 annonce abonnement.
+async function getMonthlyAnnonceCount(userId) {
+  const rows = await query(
+    `SELECT COUNT(*)::int AS count FROM ai_usage
+     WHERE user_id = $1 AND kind = 'multipost-annonce'
+       AND created_at >= date_trunc('month', NOW())`,
+    [userId]
+  );
+  return rows?.[0]?.count || 0;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Routes
 // ─────────────────────────────────────────────────────────────
@@ -421,18 +434,9 @@ export default async function clipboardRoutes(app) {
       consumeFrom = 'pack';
       packIdToDebit = packRow.id;
     } else if (subActive && monthlyLimit > 0) {
-      // Pas de pack → fallback sur quota mensuel (Ultra)
-      if (monthlyLimit !== Infinity) {
-        const used = await getMonthlyUsage(user.id);
-        if (used >= monthlyLimit) {
-          return reply.code(429).send({
-            error: 'quota mensuel atteint',
-            used,
-            limit: monthlyLimit,
-            hint: 'Achète un pack Multipost IA pour continuer ce mois-ci',
-          });
-        }
-      }
+      // v1.3.725 : le quota mensuel Ultra est désormais compté PAR ANNONCE au moment de
+      // la publication (claim-annonce-credit), PAS par photo ici. bg-swap valide juste
+      // l'accès (abo actif) et laisse détourer librement ; le plafond annonces est au claim.
       consumeFrom = 'subscription';
     } else {
       // Ni pack ni abo Ultra actif → bloque + suggère achat pack
@@ -753,6 +757,26 @@ export default async function clipboardRoutes(app) {
         hint: 'Achete un pack Multipost IA pour publier des annonces',
       });
     }
+    // v1.3.725 : quota mensuel Ultra compté PAR ANNONCE (50/mois). Si atteint → pack requis.
+    if (includedMonthly !== Infinity) {
+      const usedThisMonth = await getMonthlyAnnonceCount(user.id);
+      if (usedThisMonth >= includedMonthly) {
+        return reply.code(429).send({
+          error: 'quota mensuel atteint',
+          used: usedThisMonth,
+          limit: includedMonthly,
+          hint: 'Quota Multipost mensuel atteint — achète un pack pour continuer ce mois-ci',
+        });
+      }
+    }
+    // Enregistre 1 annonce abonnement consommée (pour le comptage mensuel par annonce).
+    try {
+      await query(
+        `INSERT INTO ai_usage (user_id, kind, tokens_input, tokens_output, cost_usd)
+         VALUES ($1, 'multipost-annonce', 0, 0, 0)`,
+        [user.id]
+      );
+    } catch (e) { app.log.warn({ err: e }, 'multipost-annonce usage insert failed'); }
     return { ok: true, source: 'subscription', remaining: null, cost };
   });
 
@@ -775,9 +799,11 @@ export default async function clipboardRoutes(app) {
     const monthlyLimit = DEV_BYPASS ? Infinity : (planDef.bgSwapMonthly || 0);
     const limitOut = monthlyLimit === Infinity ? null : monthlyLimit;
 
+    // v1.3.725 : quota mensuel compté PAR ANNONCE (pas par photo) → cohérent avec le label
+    // "annonces" du modal et avec l'enforcement au claim.
     let used = 0;
     if (monthlyLimit > 0 && monthlyLimit !== Infinity) {
-      used = await getMonthlyUsage(user.id);
+      used = await getMonthlyAnnonceCount(user.id);
     }
 
     // v1.3.10 : crédits maintenant fractionnaires (NUMERIC) — Studio coûte 1.5
