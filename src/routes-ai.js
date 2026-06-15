@@ -127,7 +127,7 @@ export default async function aiRoutes(app) {
     // v1.3.733 : fourchette de longueur de titre (bornée 10-100, max Vinted) + hashtags
     const tMax = Math.min(100, Math.max(20, parseInt(p.titleMax, 10) || 100));
     const tMin = Math.min(tMax, Math.max(10, parseInt(p.titleMin, 10) || 70));
-    const wantHashtags = !!p.hashtags;
+    const wantHashtags = p.hashtags !== false; // v1.3.737 : hashtags ON par défaut (le plus important sur Vinted)
     const hashtagN = Math.min(10, Math.max(1, parseInt(p.hashtagCount, 10) || 5));
 
     // v1.3.8 : prompt enrichi avec prefs + plans titre/description
@@ -146,9 +146,9 @@ export default async function aiRoutes(app) {
 🧵 Matière : ...
 🧼 Lavé, repassé et plié
 🚚 Envoi sous 24h
-📦 Colis soigneusement emballé
+📦 Colis soigneusement emballé${wantHashtags ? '' : `
 
-Mots clés : 12-15 mots-clés pertinents séparés par espaces (pas de hashtags)`;
+Mots clés : 12-15 mots-clés pertinents séparés par espaces (pas de hashtags)`}`;
 
     const system = `Tu es un expert de la vente sur Vinted. À partir des photos fournies, tu génères :
 ${titleInstruction}
@@ -162,7 +162,7 @@ ${inclusions.length ? '- Inclus dans la description : ' + inclusions.join(', ') 
 ${noEmoji ? '- AUCUN emoji nulle part' : '- Tu peux utiliser 1-3 emojis pertinents (pas plus)'}
 ${safeAvoid ? '- N\'utilise JAMAIS ces mots/expressions : ' + safeAvoid : ''}
 ${safeExtraKeywords ? '- Inclus naturellement ces mots-clés quand pertinent : ' + safeExtraKeywords : ''}
-${wantHashtags ? '- Termine OBLIGATOIREMENT la description par exactement ' + hashtagN + ' hashtags RÉELS et pertinents en rapport avec l\'article (marque, catégorie, style, matière, époque), format #motcle collé (sans espace ni accent), ex : #levis #jeanvintage #denim #y2k. Mets-les sur une nouvelle ligne à la toute fin.' : '- N\'utilise PAS de hashtags dans la description'}
+${wantHashtags ? '- HASHTAGS OBLIGATOIRES (partie la PLUS importante) : termine la description par une ligne vide, puis EXACTEMENT ' + hashtagN + ' hashtags pertinents et réellement RECHERCHÉS par les acheteurs Vinted. Couvre des angles VARIÉS (ne te contente PAS de répéter les mots du titre) : la marque, le type d\'article, le style/tendance (ex : #vintage #y2k #streetwear #cottagecore #oldmoney), la matière, la coupe, la saison/occasion. Format STRICT : minuscules, sans accent ni espace, un seul mot collé par hashtag (ex : #zara #robecourte #fleuri #boheme #ete). Évite les hashtags génériques inutiles type #mode #vetement #vinted.' : '- N\'utilise PAS de hashtags dans la description'}
 
 Réponds UNIQUEMENT en JSON valide sans markdown : { "title": "...", "description": "..." }
 Le titre DOIT faire entre ${tMin} et ${tMax} caractères (jamais plus de ${tMax}).
