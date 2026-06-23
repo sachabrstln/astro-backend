@@ -128,7 +128,7 @@ export default async function aiRoutes(app) {
     const tMax = Math.min(100, Math.max(20, parseInt(p.titleMax, 10) || 100));
     const tMin = Math.min(tMax, Math.max(10, parseInt(p.titleMin, 10) || 70));
     const wantHashtags = p.hashtags !== false; // v1.3.737 : hashtags ON par défaut (le plus important sur Vinted)
-    const hashtagN = Math.min(10, Math.max(1, parseInt(p.hashtagCount, 10) || 5));
+    const hashtagN = Math.min(50, Math.max(1, parseInt(p.hashtagCount, 10) || 25)); // v1.3.738 : jusqu'à 50 hashtags
 
     // v1.3.8 : prompt enrichi avec prefs + plans titre/description
     const titleInstruction = safeTitleTemplate
@@ -162,7 +162,7 @@ ${inclusions.length ? '- Inclus dans la description : ' + inclusions.join(', ') 
 ${noEmoji ? '- AUCUN emoji nulle part' : '- Tu peux utiliser 1-3 emojis pertinents (pas plus)'}
 ${safeAvoid ? '- N\'utilise JAMAIS ces mots/expressions : ' + safeAvoid : ''}
 ${safeExtraKeywords ? '- Inclus naturellement ces mots-clés quand pertinent : ' + safeExtraKeywords : ''}
-${wantHashtags ? '- HASHTAGS OBLIGATOIRES (partie la PLUS importante) : termine la description par une ligne vide, puis EXACTEMENT ' + hashtagN + ' hashtags pertinents et réellement RECHERCHÉS par les acheteurs Vinted. Couvre des angles VARIÉS (ne te contente PAS de répéter les mots du titre) : la marque, le type d\'article, le style/tendance (ex : #vintage #y2k #streetwear #cottagecore #oldmoney), la matière, la coupe, la saison/occasion. Format STRICT : minuscules, sans accent ni espace, un seul mot collé par hashtag (ex : #zara #robecourte #fleuri #boheme #ete). Évite les hashtags génériques inutiles type #mode #vetement #vinted.' : '- N\'utilise PAS de hashtags dans la description'}
+${wantHashtags ? '- HASHTAGS OBLIGATOIRES (partie la PLUS importante du référencement Vinted) : termine la description par une ligne vide, puis EXACTEMENT ' + hashtagN + ' hashtags pertinents et réellement RECHERCHÉS par les acheteurs, séparés par des espaces. Il en faut VRAIMENT ' + hashtagN + ' (ni moins ni plus). Maximise la COUVERTURE en variant les angles, sans répéter le titre : marque + déclinaisons (ex #levis #levishomme #levisjean), genre (#homme #femme), type d\'article, coupe/fit (#slimfit #straightfit #bootcut), matière (#denim #bluejeans #cuir), style & tendances (#vintage #y2k #oldmoney #streetwear #normcore #retro #cottagecore #americana #workwear #heritage), époque (#90sfashion #2000sfashion), communauté & seconde main (#friperie #secondemain #thrifted #thriftstorefinds #vintagefinds #revente #slowfashion #denimaddict #denimlovers), occasion/look (#casual #ootd #lookhomme #tendance). Adapte TOUJOURS au produit réel des photos (n\'invente pas une marque/matière). Format STRICT : minuscules, sans accent ni espace, un seul mot collé par hashtag. Évite uniquement les génériques vides type #mode #vetement #vinted.' : '- N\'utilise PAS de hashtags dans la description'}
 
 Réponds UNIQUEMENT en JSON valide sans markdown : { "title": "...", "description": "..." }
 Le titre DOIT faire entre ${tMin} et ${tMax} caractères (jamais plus de ${tMax}).
@@ -184,7 +184,7 @@ VARIANTE #${attemptNum}${seed ? ' (seed: ' + seed + ')' : ''} : produis une form
     try {
       const response = await anthropic.messages.create({
         model: aiModel.modelId,
-        max_tokens: 900,
+        max_tokens: 1300, // v1.3.738 : marge pour jusqu'à 50 hashtags + description
         // v1.3.9 : temperature plus élevée sur Régénérer pour forcer la variation
         temperature: attemptNum > 1 ? 1.0 : 0.8,
         system,
