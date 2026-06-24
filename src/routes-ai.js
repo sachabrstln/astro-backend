@@ -216,9 +216,11 @@ VARIANTE #${attemptNum}${seed ? ' (seed: ' + seed + ')' : ''} : produis une form
 
       return { title, description: String(parsed.description || '').trim() };
     } catch (e) {
-      app.log.error({ err: e }, 'Anthropic call failed');
-      // Pas de leak de détail en prod
-      return reply.code(502).send({ error: 'erreur API IA', detail: IS_PROD ? undefined : e.message });
+      app.log.error({ err: e, status: e?.status || e?.statusCode }, 'Anthropic call failed');
+      // v1.3.740 (diag) : on expose le CODE HTTP Anthropic (et PAS le détail) pour pouvoir
+      // diagnostiquer (429 rate-limit, 529 overloaded, 401 clé, 400 crédits, etc.).
+      const st = (e && (e.status || e.statusCode)) ? ' [' + (e.status || e.statusCode) + ']' : '';
+      return reply.code(502).send({ error: 'erreur API IA' + st, detail: IS_PROD ? undefined : e.message });
     }
   });
 
