@@ -50,7 +50,7 @@ export default async function stripeRoutes(app) {
       line_items: [{ price: priceId, quantity: 1 }],
       allow_promotion_codes: true,
       success_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/pricing',
+      cancel_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/#pricing',
       // v1.3.2 : empreinte CB obligatoire (refuse les checkouts sans payment method)
       payment_method_collection: 'always',
       subscription_data: {
@@ -133,7 +133,7 @@ export default async function stripeRoutes(app) {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/success?session_id={CHECKOUT_SESSION_ID}',
-      cancel_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/signup',
+      cancel_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/#signup',
       // CB obligatoire (sinon Stripe refuse le subscription)
       payment_method_collection: 'always',
       subscription_data: {
@@ -196,8 +196,8 @@ export default async function stripeRoutes(app) {
       mode: 'payment', // one-time purchase, pas subscription
       line_items: [{ price: def.priceId, quantity: 1 }],
       allow_promotion_codes: true,
-      success_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/dashboard?pack_purchased=' + pack,
-      cancel_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/dashboard#abonnement',
+      success_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/success?pack=' + pack,
+      cancel_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/#pricing',
       // Metadata propagé au webhook pour grant les crédits
       payment_intent_data: {
         metadata: { user_id: String(user.id), pack, pack_size: String(def.size) }
@@ -235,7 +235,7 @@ export default async function stripeRoutes(app) {
     if (!user?.stripe_customer_id) return reply.code(400).send({ error: 'aucun abonnement Stripe' });
     const portal = await stripe.billingPortal.sessions.create({
       customer: user.stripe_customer_id,
-      return_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/dashboard'
+      return_url: (process.env.FRONTEND_URL || 'https://astro-pro.app') + '/success'
     });
     return { url: portal.url };
   });
