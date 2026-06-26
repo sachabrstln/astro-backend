@@ -279,7 +279,9 @@ export default async function stripeRoutes(app) {
   });
 
   // POST /stripe/webhook — traité RAW par Stripe signature
-  app.post('/stripe/webhook', { config: { rawBody: true } }, async (req, reply) => {
+  // H5 FIX : rateLimit:false → le webhook ne doit JAMAIS être 429 (sinon Stripe retry +
+  // risque de perte d'event). Le rate-limit global per-IP pourrait throttler les IP Stripe.
+  app.post('/stripe/webhook', { config: { rawBody: true, rateLimit: false } }, async (req, reply) => {
     const sig = req.headers['stripe-signature'];
     let event;
     try {
@@ -316,9 +318,11 @@ export default async function stripeRoutes(app) {
       await handleStripeEvent(event);
     } catch (e) {
       app.log.error('Webhook handler error: ' + e.message);
-      // Note : l'event est marqué comme vu mais le handler a fail.
-      // On renvoie 500 → Stripe retry. ON CONFLICT empêchera un double-traitement
-      // de la partie INSERT mais le handler tournera 2 fois — handler doit être idempotent.
+      // C1 FIX : le handler a échoué → on RETIRE la marque d'idempotence pour que le retry
+      // Stripe RETRAITE l'event. Avant : la ligne webhook_events restait insérée → le retry
+      // Stripe était droppé par ON CONFLICT → l'activation d'abonnement / la commission parrain
+      // était PERDUE à jamais (argent pris, plan jamais accordé).
+      try { await query('DELETE FROM webhook_events WHERE stripe_event_id = $1', [event.id]); } catch (_) {}
       return reply.code(500).send('handler error');
     }
     return { received: true };
@@ -399,7 +403,24 @@ async function handleStripeEvent(event) {
       const userId = await resolveStripeUserId(obj);
       if (!userId) return;
       const priceId = obj.items?.data?.[0]?.price?.id;
-      const { plan, billing } = priceIdToPlan(priceId);
+      let { plan, billing } = priceIdToPlan(priceId);
+      // C2 FIX : si le priceId ne matche AUCUN env var STRIPE_PRICE_*, priceIdToPlan renvoie le
+      // fallback 'free' → on downgraderait un client qui vient de PAYER (plan='free' = 0 feature).
+      // On ne fait JAMAIS ça : on retombe sur le plan visé au checkout (metadata), sinon on GARDE
+      // le plan actuel. Et on loggue une alerte forte pour corriger les env Stripe.
+      if (plan === 'free' && priceId) {
+        const metaPlan = obj.metadata?.plan || obj.metadata?.target_plan
+          || obj.subscription_details?.metadata?.plan || null;
+        if (metaPlan && metaPlan !== 'free' && metaPlan !== 'none') {
+          console.error('[Stripe] ALERTE PRICE->PLAN MISMATCH priceId=' + priceId + ' user=' + userId + ' → fallback metadata plan=' + metaPlan + ' (VERIFIE LES ENV STRIPE_PRICE_*)');
+          plan = metaPlan;
+        } else {
+          const cur = await queryOne('SELECT plan FROM users WHERE id = $1', [userId]);
+          const keep = (cur && cur.plan && cur.plan !== 'free' && cur.plan !== 'none') ? cur.plan : null;
+          console.error('[Stripe] ALERTE PRICE->PLAN MISMATCH priceId=' + priceId + ' user=' + userId + ' sans metadata → garde plan=' + (keep || plan) + ' (VERIFIE LES ENV STRIPE_PRICE_*)');
+          if (keep) plan = keep;
+        }
+      }
       const effectiveBilling = billing || (obj.metadata?.billing === 'annual' ? 'annual' : 'monthly');
       const expiresAt = obj.current_period_end ? new Date(obj.current_period_end * 1000) : null;
       // v1.3.2 : statuses possibles
@@ -551,13 +572,29 @@ async function handleStripeEvent(event) {
       break;
     }
     case 'invoice.payment_failed': {
-      // v1.3.9 : politique stricte — si Stripe nous notifie un échec de paiement
-      // sur un renouvellement (cycle), on cancel IMMÉDIATEMENT la subscription.
-      // Pas de "past_due" + retry smart : payment failed = abonnement terminé.
-      // L'utilisateur devra refaire un signup s'il veut revenir.
+      // H2 FIX : on RESPECTE le dunning Stripe. Un échec transitoire (3DS, plafond ou solde
+      // momentané) ne doit PAS résilier un client payant. Tant que Stripe va RETENTER
+      // (next_payment_attempt défini), on passe en 'past_due' (accès MAINTENU) + email doux.
+      // On ne résilie DÉFINITIVEMENT que quand Stripe a épuisé ses tentatives.
       const userId = await resolveStripeUserId(obj);
       const subId = obj.subscription;
       if (!userId) break;
+      if (obj.next_payment_attempt) {
+        try { await query("UPDATE users SET plan_status = 'past_due' WHERE id = $1", [userId]); } catch (e) {}
+        try {
+          const u = await queryOne('SELECT email FROM users WHERE id = $1', [userId]);
+          if (u?.email) {
+            const { sendEmail } = await import('./security.js');
+            const retryDate = new Date(obj.next_payment_attempt * 1000).toLocaleDateString('fr-FR');
+            await sendEmail({
+              to: u.email,
+              subject: 'Astro — paiement à régulariser (accès maintenu)',
+              html: `<div style="font-family:system-ui,sans-serif;max-width:480px;margin:0 auto;padding:24px;"><h2 style="color:#D97706;">Paiement à régulariser</h2><p>Le paiement de ton renouvellement Astro n'a pas pu aboutir (carte refusée, plafond ou solde insuffisant).</p><p>Pas de panique : ton accès est <strong>maintenu</strong>, on réessaie automatiquement le ${retryDate}. Mets à jour ta carte sur <a href="https://astro-pro.app">astro-pro.app</a> pour éviter toute coupure.</p></div>`,
+            });
+          }
+        } catch (e) {}
+        break;
+      }
       try {
         // Cancel immédiat de la sub Stripe (au lieu de la laisser en past_due)
         if (subId) {

@@ -88,6 +88,18 @@ await app.register(cors, {
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   throw new Error('JWT_SECRET manquant ou trop court (min 32 chars)');
 }
+// M2 (pré-lancement) : on vérifie au DÉMARRAGE la présence des variables d'env critiques,
+// pour repérer une mauvaise config Render AVANT qu'un client tombe sur un 500 ou un downgrade
+// silencieux. WARN fort (pas de crash, sauf DATABASE_URL qui est vital pour éviter une panne).
+{
+  const REQUIRED = ['DATABASE_URL', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'ANTHROPIC_API_KEY'];
+  const missing = REQUIRED.filter((k) => !process.env[k]);
+  if (missing.length) {
+    console.error('⚠️  CONFIG INCOMPLÈTE — variables d\'env MANQUANTES sur Render : ' + missing.join(', ')
+      + ' → paiements / IA / activation de plan risquent de CASSER. Vérifie aussi les 6 STRIPE_PRICE_*_MONTHLY/_ANNUAL.');
+    if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL manquant — démarrage impossible.');
+  }
+}
 await app.register(jwt, { secret: process.env.JWT_SECRET });
 
 // ── Cache de sessions valides (in-memory LRU, TTL 5 min) ────────────
