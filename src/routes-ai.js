@@ -4,7 +4,18 @@ import { query, queryOne } from './db.js';
 import { PLANS, hasFeature } from './plans.js';
 import { sanitizePromptInput, audit } from './security.js';
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// v1.3.742 (FIX SEO "Service IA indisponible") : le SDK 0.32 utilise node-fetch 2.x, qui
+// plante en ERR_STREAM_PREMATURE_CLOSE pendant le gunzip de la réponse Anthropic
+// ("Invalid response body ... Premature close") → SEO en échec répété. On force le fetch
+// NATIF de Node 20 (undici), qui gère le gzip/streaming correctement, et on monte les retries.
+const _nativeFetch = (typeof globalThis.fetch === 'function')
+  ? ((...args) => globalThis.fetch(...args))
+  : undefined;
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  fetch: _nativeFetch,
+  maxRetries: 4,
+});
 
 const IS_PROD = process.env.NODE_ENV === 'production';
 
