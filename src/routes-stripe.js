@@ -303,7 +303,10 @@ export default async function stripeRoutes(app) {
          VALUES ($1, $2, $3)
          ON CONFLICT (stripe_event_id) DO NOTHING
          RETURNING id`,
-        [event.id, event.type, JSON.stringify(event.data.object).slice(0, 10000)]
+        // v1.3.750 : PAS de .slice() — couper le JSON produisait un JSONB invalide sur les
+        // gros events (invoice.*/subscription.* > 10 Ko) → INSERT rejeté → 500 → retry Stripe
+        // infini, event jamais traité (plan/commission perdus alors que le paiement est encaissé).
+        [event.id, event.type, JSON.stringify(event.data.object)]
       );
     } catch (e) {
       app.log.error('Webhook idempotency INSERT error: ' + e.message);

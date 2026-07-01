@@ -1,6 +1,12 @@
 // Migration : crée les tables de la DB (idempotent)
 import 'dotenv/config';
 import { pool } from './db.js';
+import { readdirSync, readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS_DIR = join(__dirname, '..', 'migrations');
 
 const SQL = `
 CREATE TABLE IF NOT EXISTS users (
@@ -257,7 +263,32 @@ CREATE INDEX IF NOT EXISTS idx_market_captured ON market_snapshots(captured_at);
 async function migrate() {
   try {
     await pool.query(SQL);
-    console.log('✓ Migration terminée');
+    console.log('✓ Schéma de base OK');
+
+    // v1.3.750 FIX LANCEMENT : applique aussi les migrations/*.sql (dans l'ordre trié).
+    // Avant, migrate.js n'exécutait QUE le SQL inline ci-dessus → les tables/colonnes
+    // ajoutées après coup (pack_credits, trial_history, target_plan/target_billing,
+    // card_fingerprint, colonnes Stripe Connect, crédits fractionnaires) n'existaient
+    // JAMAIS sur une DB fraîche → trial/packs/parrainage/Connect crashaient en 500.
+    // Tous ces fichiers sont idempotents (IF NOT EXISTS), donc rejouables sur la prod.
+    let files = [];
+    try {
+      files = readdirSync(MIGRATIONS_DIR).filter(f => f.endsWith('.sql')).sort();
+    } catch (e) {
+      console.warn('⚠ Dossier migrations/ introuvable (' + e.message + ') — SQL inline seul appliqué');
+    }
+    for (const f of files) {
+      const sql = readFileSync(join(MIGRATIONS_DIR, f), 'utf8');
+      try {
+        await pool.query(sql);
+        console.log('✓ migration ' + f);
+      } catch (e) {
+        console.error('✗ migration ' + f + ' échouée: ' + e.message);
+        process.exit(1);
+      }
+    }
+
+    console.log('✓ Migration terminée (' + files.length + ' fichier(s) migrations/ appliqué(s))');
     process.exit(0);
   } catch (e) {
     console.error('✗ Migration échouée:', e.message);
