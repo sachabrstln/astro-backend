@@ -252,7 +252,7 @@ export default async function authRoutes(app) {
       `INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
       [user.id, hashToken(verifCode), verifExpires]
     );
-    await sendEmail({
+    const mailRes = await sendEmail({
       to: user.email,
       subject: 'Ton code de vérification Astro : ' + verifCode,
       html: `
@@ -270,7 +270,9 @@ export default async function authRoutes(app) {
 
     await audit(req, 'signup_success', { user_id: user.id });
     const token = await issueSession(app, user, req);
-    return { token, user, emailVerificationSent: true };
+    // v1.3.750 : flag honnête — false si RESEND_API_KEY absente (email jamais parti).
+    // Le front peut alors ne pas afficher "code envoyé" à tort.
+    return { token, user, emailVerificationSent: mailRes?.skipped !== true };
   });
 
   // ── POST /auth/login ───────────────────────────────

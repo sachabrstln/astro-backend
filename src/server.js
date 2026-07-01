@@ -99,6 +99,13 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
       + ' → paiements / IA / activation de plan risquent de CASSER. Vérifie aussi les 6 STRIPE_PRICE_*_MONTHLY/_ANNUAL.');
     if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL manquant — démarrage impossible.');
   }
+  // v1.3.750 : RESEND_API_KEY à part — sans elle AUCUN email ne part (code de vérif,
+  // reset password, reminders trial). Le gate email_verified est alors AUTO-DÉSACTIVÉ
+  // (voir plus bas) pour ne pas verrouiller les nouveaux comptes hors du funnel.
+  if (!process.env.RESEND_API_KEY) {
+    console.error('⚠️  RESEND_API_KEY manquante — emails DÉSACTIVÉS (vérif email, reset password). '
+      + 'Le gate email_verified est suspendu en attendant. Configure Resend avant le lancement.');
+  }
 }
 await app.register(jwt, { secret: process.env.JWT_SECRET });
 
@@ -203,7 +210,10 @@ app.decorate('authenticate', async (req, reply) => {
       });
     }
     // Email gating : routes critiques bloquées si email pas vérifié sur compte récent
-    if (u && u.email_verified === false) {
+    // v1.3.750 : gate actif UNIQUEMENT si la délivrance email est configurée (RESEND_API_KEY).
+    // Sans clé Resend, le code de vérif ne part JAMAIS → exiger la vérif = lockout total
+    // des nouveaux comptes (même philosophie que verifyTurnstile : pas de config = pas de gate).
+    if (u && u.email_verified === false && process.env.RESEND_API_KEY) {
       const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86400000;
       if (ageDays < 7) {
         const critical = /^\/api\/(ai|clipboard)\//.test(req.url) || req.url.startsWith('/referral/');
@@ -223,7 +233,9 @@ app.decorate('authenticate', async (req, reply) => {
       'SELECT email_verified, created_at FROM users WHERE id = $1',
       [userId]
     );
-    if (u && u.email_verified === false) {
+    // v1.3.750 : même condition RESEND_API_KEY que le gate IA — sans délivrance email,
+    // exiger la vérif bloquerait le funnel paiement entier dès l'inscription.
+    if (u && u.email_verified === false && process.env.RESEND_API_KEY) {
       const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86400000;
       if (ageDays < 7) {
         return reply.code(403).send({
