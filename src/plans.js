@@ -25,7 +25,6 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_STARTER_ANNUAL',
     maxAccounts: 1,
     seoMonthly: 0,
-    bgSwapMonthly: 0, // Clipboard copier-coller multi-comptes : Ultra-only
     features: {
       republish: true, republishDaily: 10,
       messagesDaily: 20,
@@ -45,7 +44,7 @@ export const PLANS = {
   // v1.3.7 : repositionné — 3 comptes, relances illimitées, articles dormants,
   // score vendeur, assistant SEO. Reste Ultra-only : Profits&ROI, Compta URSSAF,
   // Pricing Intel, Articles Gagnants, Bundle, Négo IA, Réponses auto IA,
-  // multi-compte 10, Multipost IA inclus.
+  // multi-compte 10.
   pro: {
     name: 'Astro Pro',
     price: 35,
@@ -55,7 +54,6 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_PRO_ANNUAL',
     maxAccounts: 3,                         // v1.3.7 : 1 → 3 comptes
     seoMonthly: 50,                         // v1.3.7 : SEO IA inclus (vs 0)
-    bgSwapMonthly: 0,                       // Multipost IA : à la carte uniquement
     features: {
       republish: true, republishDaily: 25,
       messagesDaily: Infinity,              // v1.3.7 : illimité (vs 250)
@@ -107,10 +105,6 @@ export const PLANS = {
     priceEnvAnnual:  'STRIPE_PRICE_ULTRA_ANNUAL',
     maxAccounts: 10,             // multi-comptes Ultra-only
     seoMonthly: Infinity,
-    // v1.3.725 : quota Multipost = 50 ANNONCES/mois incluses (compté PAR ANNONCE au
-    // moment de la publication, pas par photo). Au-delà, l'user achète un pack.
-    // (bgSwapMonthly garde son nom historique mais représente désormais des ANNONCES.)
-    bgSwapMonthly: 50,
     popular: true,               // badge "Recommandé" déplacé sur Ultra
     socialProof: '4 vendeurs sur 5 le choisissent',
     features: {

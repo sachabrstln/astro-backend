@@ -8,7 +8,6 @@ import rateLimit from '@fastify/rate-limit';
 import authRoutes from './routes-auth.js';
 import stripeRoutes from './routes-stripe.js';
 import aiRoutes from './routes-ai.js';
-import clipboardRoutes from './routes-clipboard.js';
 import referralRoutes from './routes-referral.js';
 import adminRoutes from './routes-admin.js';
 import supportRoutes from './routes-support.js';
@@ -216,7 +215,7 @@ app.decorate('authenticate', async (req, reply) => {
     if (u && u.email_verified === false && process.env.RESEND_API_KEY) {
       const ageDays = (Date.now() - new Date(u.created_at).getTime()) / 86400000;
       if (ageDays < 7) {
-        const critical = /^\/api\/(ai|clipboard)\//.test(req.url) || req.url.startsWith('/referral/');
+        const critical = /^\/api\/ai\//.test(req.url) || req.url.startsWith('/referral/');
         if (critical) {
           return reply.code(403).send({
             error: 'email_non_verifie',
@@ -317,7 +316,6 @@ app.get('/health', async () => ({
 await app.register(authRoutes);
 await app.register(stripeRoutes);
 await app.register(aiRoutes);
-await app.register(clipboardRoutes);
 await app.register(referralRoutes);
 // v1.3.4 (#9) : routes admin (auth + email check)
 await app.register(adminRoutes);
