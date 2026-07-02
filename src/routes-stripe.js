@@ -441,25 +441,28 @@ async function handleStripeEvent(event) {
       break;
     }
     case 'invoice.paid': {
-      // 1er paiement après trial OU renouvellement → user devient 'active'
+      // 1er paiement RÉEL après trial OU renouvellement → user 'active' + commission parrain.
       const userId = await resolveStripeUserId(obj);
-      if (userId && (obj.billing_reason === 'subscription_cycle' || obj.billing_reason === 'subscription_create')) {
+      const amountPaidCents = obj.amount_paid || 0;
+      const isSubInvoice = obj.billing_reason === 'subscription_cycle' || obj.billing_reason === 'subscription_create';
+      // v1.3.754 (FIX PARRAINAGE — money) : on IGNORE la facture $0 de DÉBUT de trial
+      // (billing_reason=subscription_create, amount_paid=0, émise à la création de la sub).
+      // Avant, elle activait la commission ET incrémentait commission_paid_count pour 0€
+      // → le parrain perdait 1 de ses 4 mois. On n'agit QUE sur un vrai encaissement (>0).
+      if (userId && isSubInvoice && amountPaidCents > 0) {
         await query(
           `UPDATE users SET plan_status = 'active' WHERE id = $1 AND plan_status IN ('trialing', 'past_due')`,
           [userId]
         );
-        // v1.3.8 : commission parrain — active au 1er paiement, crédite à chaque paiement (4 mois max)
         try {
           const ref = await import('./routes-referral.js');
-          if (obj.billing_reason === 'subscription_create') {
-            // 1er paiement après trial → active la commission
-            if (ref.activateReferralOnFirstPayment) await ref.activateReferralOnFirstPayment(userId);
-          }
-          // Crédite la commission parrain (mois 1, 2, 3, 4 du filleul)
+          // Idempotent : n'active la commission que si le referral est encore 'pending'
+          // (= ce vrai paiement est le 1er). Sûr à appeler à chaque facture payée.
+          if (ref.activateReferralOnFirstPayment) await ref.activateReferralOnFirstPayment(userId);
+          // Crédite la commission parrain (mois 1→4 du filleul, cap géré côté referral)
           if (ref.creditCommissionForPayment) {
-            const amountPaidCents = obj.amount_paid || 0;
-            // v1.3.725 : intervalle de facturation (month/year) → prorata annuel côté
-            // commission (sinon 1 facture annuelle = 30% d'une année entière).
+            // v1.3.725 : intervalle de facturation (month/year) → l'annuel crédite les
+            // mois de commission restants d'un coup (1 seule facture/an).
             const billingInterval = obj.lines?.data?.[0]?.price?.recurring?.interval
                                  || obj.lines?.data?.[0]?.plan?.interval
                                  || null;

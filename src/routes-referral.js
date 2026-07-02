@@ -79,29 +79,34 @@ export async function creditCommissionForPayment(refereeUserId, amountPaidCents,
     [refereeUserId]
   );
   if (!ref) return null;
-  if (ref.commission_paid_count >= COMMISSION_MONTHS) return null; // déjà 4 mois payés
+  const currentCount = ref.commission_paid_count || 0;
+  const remaining = COMMISSION_MONTHS - currentCount;
+  if (remaining <= 0) return null; // déjà 4 mois payés
 
-  // v1.3.725 : le cap est "4 MOIS" mais amountPaidCents = montant de la facture entière.
-  // Pour un filleul ANNUEL, une facture = 12 mois → sans prorata on crédite 30% d'une
-  // année entière, et comme il n'y a qu'1 facture/an le cap par-facture ne se déclenche
-  // jamais. On ramène donc au mois-équivalent pour les factures annuelles.
+  // v1.3.754 (FIX money) :
+  // - MENSUEL : 1 facture = 1 mois → crédite 30% d'1 mois, +1 au compteur.
+  // - ANNUEL : 1 facture = 12 mois payés d'avance, et il n'y aura pas d'autre facture
+  //   avant 1 an (fenêtre de 4 mois expirée d'ici là). Avant, on ne créditait qu'1 mois
+  //   → le parrain perdait 3 des 4 mois pour un filleul annuel. On crédite donc d'un coup
+  //   les mois de commission RESTANTS (max 4).
   const isAnnual = (billingInterval === 'year' || billingInterval === 'annual');
+  const monthsToCredit = isAnnual ? remaining : 1;
   const monthlyEquivCents = isAnnual ? Math.round(amountPaidCents / 12) : amountPaidCents;
-  const commissionCents = Math.round(monthlyEquivCents * COMMISSION_PCT / 100);
+  const commissionCents = Math.round(monthlyEquivCents * COMMISSION_PCT / 100) * monthsToCredit;
 
-  // v1.3.725 : incrément ATOMIQUE auto-gardé (WHERE commission_paid_count < cap). Évite
-  // qu'un crédit dépasse le cap si deux invoice.paid concurrents lisent le même count.
-  // On ne crédite la cagnotte QUE si l'UPDATE a bien incrémenté (RETURNING).
+  // Concurrence optimiste : ne crédite que si le compteur n'a pas bougé depuis le SELECT
+  // (WHERE commission_paid_count = currentCount). Deux invoice.paid concurrents → un seul
+  // passe. Incrémente de monthsToCredit (1 mensuel, jusqu'à 4 annuel).
   const upd = await queryOne(
     `UPDATE referrals SET
-       commission_paid_count = commission_paid_count + 1,
+       commission_paid_count = commission_paid_count + $4,
        parrain_commission_total_cents = parrain_commission_total_cents + $1,
        parrain_commission_total_eur = (parrain_commission_total_cents + $1) / 100.0
-     WHERE id = $2 AND commission_paid_count < $3
+     WHERE id = $2 AND commission_paid_count = $3
      RETURNING id`,
-    [commissionCents, ref.id, COMMISSION_MONTHS]
+    [commissionCents, ref.id, currentCount, monthsToCredit]
   );
-  if (!upd) return null; // cap atteint entre le SELECT et l'UPDATE → pas de double crédit
+  if (!upd) return null; // compteur modifié entre SELECT et UPDATE → pas de double crédit
   // Crédit cagnotte parrain
   await query(
     `UPDATE users SET
