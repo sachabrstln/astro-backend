@@ -2,13 +2,13 @@
 // Programme parrainage v2 (v1.3.8) — Stripe Connect Express
 //
 // Filleul (signup avec code) :
-//   → Réduction -15% sur le 1er mois payant après les 7 jours d'essai
+//   → Réduction -20% sur le 1er mois payant après les 7 jours d'essai
 //
 // Parrain :
 //   → Choisit son propre code (4-12 caractères alphanumériques, IMMUTABLE)
-//   → 30% de commission cash sur les paiements du filleul pendant 4 mois
+//   → 20% de commission cash sur les paiements du filleul pendant 4 mois MAX
 //   → Cagnotte cumulée payable via Stripe Connect Express (KYC + virement IBAN auto)
-//   → Auto-stop si filleul résilie ou demande remboursement
+//   → Auto-stop dès que le filleul résilie / est remboursé (commission stoppée au même moment)
 // ──────────────────────────────────────────────────────────────
 
 import { query, queryOne } from './db.js';
@@ -19,11 +19,11 @@ const stripe = process.env.STRIPE_SECRET_KEY
   ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-12-18.acacia' })
   : null;
 
-// Config
+// Config — v1.3.754 : commission 20% (règle produit confirmée), filleul -20% (coupon ASTRO_REFERRAL_20)
 const CODE_RE = /^[A-Z0-9]{4,12}$/;
-const COMMISSION_PCT = 30;     // 30% du montant net Stripe
-const COMMISSION_MONTHS = 4;   // 4 premiers mois du filleul
-const FILLEUL_DISCOUNT_PCT = 15; // -15% sur le 1er mois payant
+const COMMISSION_PCT = 20;     // 20% du montant payé par le filleul
+const COMMISSION_MONTHS = 4;   // 4 premiers mois MAX du filleul (stop si résiliation avant)
+const FILLEUL_DISCOUNT_PCT = 20; // -20% sur le 1er mois payant (coupon Stripe ASTRO_REFERRAL_20)
 const MIN_PAYOUT_CENTS = 1000; // 10€ minimum pour retrait
 
 // ── HELPERS ────────────────────────────────────────────────
@@ -125,6 +125,38 @@ export async function stopReferralOnCancellation(refereeUserId) {
      WHERE referee_user_id = $1 AND status IN ('active', 'pending')`,
     [refereeUserId]
   );
+}
+
+// v1.3.754 : clawback sur remboursement — récupère la commission déjà créditée quand un
+// filleul est remboursé (appelé via webhook charge.refunded). Plafonné à ce qui a été
+// crédité pour CE filleul, et la cagnotte du parrain ne descend JAMAIS sous 0 (s'il a déjà
+// retiré, le trop-perçu n'est pas récupérable automatiquement — décision manuelle).
+export async function clawbackCommissionOnRefund(refereeUserId, amountRefundedCents) {
+  if (!amountRefundedCents || amountRefundedCents <= 0) return null;
+  const ref = await queryOne(
+    `SELECT id, referrer_user_id, parrain_commission_total_cents
+     FROM referrals WHERE referee_user_id = $1`,
+    [refereeUserId]
+  );
+  if (!ref) return null;
+  const credited = ref.parrain_commission_total_cents || 0;
+  if (credited <= 0) return null;
+  // Clawback = COMMISSION_PCT% du montant remboursé, plafonné au total crédité pour ce filleul.
+  const clawback = Math.min(Math.round(amountRefundedCents * COMMISSION_PCT / 100), credited);
+  if (clawback <= 0) return null;
+  await query(
+    `UPDATE referrals SET
+       parrain_commission_total_cents = GREATEST(0, parrain_commission_total_cents - $1),
+       parrain_commission_total_eur = GREATEST(0, parrain_commission_total_cents - $1) / 100.0
+     WHERE id = $2`,
+    [clawback, ref.id]
+  );
+  const debited = await queryOne(
+    `UPDATE users SET cagnotte_balance_cents = GREATEST(0, cagnotte_balance_cents - $1)
+     WHERE id = $2 RETURNING cagnotte_balance_cents`,
+    [clawback, ref.referrer_user_id]
+  );
+  return { referrerUserId: ref.referrer_user_id, clawbackCents: clawback, newBalanceCents: debited?.cagnotte_balance_cents };
 }
 
 // Stats agrégées d'un parrain — défensif (fallback eur si la colonne cents n'existe pas)
@@ -356,7 +388,22 @@ export default async function referralRoutes(app) {
     if (!u.stripe_connect_account_id) {
       return reply.code(400).send({ error: 'configure d\'abord ton compte de paiement (Stripe Connect)' });
     }
-    if (!u.connect_onboarding_complete) {
+    // v1.3.754 : si le flag n'est pas posé (webhook Connect account.updated non reçu/configuré),
+    // on vérifie le statut du compte EN DIRECT chez Stripe et on répare le flag. Évite qu'un
+    // payout soit bloqué à jamais à cause d'un webhook Connect manquant.
+    let onboardingOk = !!u.connect_onboarding_complete;
+    if (!onboardingOk) {
+      try {
+        const acc = await stripe.accounts.retrieve(u.stripe_connect_account_id);
+        onboardingOk = !!(acc.details_submitted && acc.payouts_enabled);
+        if (onboardingOk) {
+          await query(`UPDATE users SET connect_onboarding_complete = TRUE WHERE id = $1`, [userId]);
+        }
+      } catch (e) {
+        console.warn('[withdraw] accounts.retrieve failed:', e.message);
+      }
+    }
+    if (!onboardingOk) {
       return reply.code(400).send({ error: 'finalise d\'abord ton onboarding Stripe Connect (KYC + IBAN)' });
     }
     const balance = u.cagnotte_balance_cents || 0;

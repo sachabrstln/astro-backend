@@ -374,6 +374,11 @@ async function handleStripeEvent(event) {
       try {
         const ref = await import('./routes-referral.js');
         if (ref.stopReferralOnCancellation) await ref.stopReferralOnCancellation(userId);
+        // v1.3.754 : récupère la commission déjà créditée sur le montant remboursé
+        if (ref.clawbackCommissionOnRefund) {
+          const amountRefundedCents = obj.amount_refunded || obj.amount || 0;
+          await ref.clawbackCommissionOnRefund(userId, amountRefundedCents);
+        }
       } catch (e) {}
       break;
     }
