@@ -97,24 +97,31 @@ export async function creditCommissionForPayment(refereeUserId, amountPaidCents,
   // Concurrence optimiste : ne crédite que si le compteur n'a pas bougé depuis le SELECT
   // (WHERE commission_paid_count = currentCount). Deux invoice.paid concurrents → un seul
   // passe. Incrémente de monthsToCredit (1 mensuel, jusqu'à 4 annuel).
+  //
+  // v1.3.756 (FIX money — atomicité) : l'incrément du compteur ET le crédit cagnotte doivent
+  // s'appliquer ATOMIQUEMENT. Avant : 2 UPDATE auto-commit séparés → si le process/DB tombait
+  // entre les deux, le compteur consommait 1 mois SANS créditer la cagnotte = perte sèche pour
+  // le parrain (et un retry Stripe ne réparait pas car le garde-fou optimiste bloquait alors).
+  // On fait tout dans UN SEUL statement (une seule transaction implicite) via CTE modifiante :
+  // l'UPDATE users ne s'exécute QUE si l'UPDATE referrals a passé le garde-fou (sinon 0 ligne).
   const upd = await queryOne(
-    `UPDATE referrals SET
-       commission_paid_count = commission_paid_count + $4,
-       parrain_commission_total_cents = parrain_commission_total_cents + $1,
-       parrain_commission_total_eur = (parrain_commission_total_cents + $1) / 100.0
-     WHERE id = $2 AND commission_paid_count = $3
-     RETURNING id`,
-    [commissionCents, ref.id, currentCount, monthsToCredit]
-  );
-  if (!upd) return null; // compteur modifié entre SELECT et UPDATE → pas de double crédit
-  // Crédit cagnotte parrain
-  await query(
-    `UPDATE users SET
+    `WITH bump AS (
+       UPDATE referrals SET
+         commission_paid_count = commission_paid_count + $4,
+         parrain_commission_total_cents = parrain_commission_total_cents + $1,
+         parrain_commission_total_eur = (parrain_commission_total_cents + $1) / 100.0
+       WHERE id = $2 AND commission_paid_count = $3
+       RETURNING referrer_user_id
+     )
+     UPDATE users SET
        cagnotte_balance_cents = cagnotte_balance_cents + $1,
        cagnotte_lifetime_cents = cagnotte_lifetime_cents + $1
-     WHERE id = $2`,
-    [commissionCents, ref.referrer_user_id]
+     FROM bump
+     WHERE users.id = bump.referrer_user_id
+     RETURNING users.id`,
+    [commissionCents, ref.id, currentCount, monthsToCredit]
   );
+  if (!upd) return null; // garde-fou optimiste non passé (compteur bougé) → pas de double crédit
   return { referrerUserId: ref.referrer_user_id, commissionCents };
 }
 

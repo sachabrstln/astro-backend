@@ -68,7 +68,9 @@ export default async function aiRoutes(app) {
     const user = await queryOne('SELECT id, plan, plan_status FROM users WHERE id = $1', [req.user.sub]);
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
     // SÉCURITÉ : vérifier d'abord que l'abonnement est actif, puis que le plan inclut la feature.
-    if (user.plan_status !== 'active' && user.plan_status !== 'trialing') {
+    // v1.3.756 : 'active_cancelling' = a résilié mais A PAYÉ jusqu'à plan_expires_at → garde
+    // l'accès aux features jusque-là (sinon on coupe un client qui a payé son mois en cours).
+    if (!['active', 'trialing', 'active_cancelling'].includes(user.plan_status)) {
       return reply.code(402).send({ error: 'abonnement non actif', plan_status: user.plan_status });
     }
     if (!hasFeature(user.plan, 'seo')) {
@@ -265,7 +267,9 @@ VARIANTE #${attemptNum}${seed ? ' (seed: ' + seed + ')' : ''} : produis une form
   }, async (req, reply) => {
     const user = await queryOne('SELECT id, plan, plan_status FROM users WHERE id = $1', [req.user.sub]);
     if (!user) return reply.code(404).send({ error: 'user introuvable' });
-    if (user.plan_status !== 'active' && user.plan_status !== 'trialing') {
+    // v1.3.756 : 'active_cancelling' = a résilié mais A PAYÉ jusqu'à plan_expires_at → garde
+    // l'accès aux features jusque-là (sinon on coupe un client qui a payé son mois en cours).
+    if (!['active', 'trialing', 'active_cancelling'].includes(user.plan_status)) {
       return reply.code(402).send({ error: 'abonnement non actif', plan_status: user.plan_status });
     }
     if (!hasFeature(user.plan, 'repauto')) {

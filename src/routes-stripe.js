@@ -322,7 +322,13 @@ async function handleStripeEvent(event) {
         }
       }
       const effectiveBilling = billing || (obj.metadata?.billing === 'annual' ? 'annual' : 'monthly');
-      const expiresAt = obj.current_period_end ? new Date(obj.current_period_end * 1000) : null;
+      // v1.3.755 : depuis l'API Stripe 2025-03-31, current_period_end n'est plus au niveau
+      // subscription mais au niveau ITEM (items.data[0].current_period_end). Sur un compte
+      // récent, obj.current_period_end est undefined → plan_expires_at tombait à NULL
+      // (dashboard "prochain débit / accès jusqu'au" vide). On lit l'item en priorité,
+      // fallback sur l'ancien emplacement pour compat.
+      const periodEndTs = obj.items?.data?.[0]?.current_period_end || obj.current_period_end || null;
+      const expiresAt = periodEndTs ? new Date(periodEndTs * 1000) : null;
       // v1.3.2 : statuses possibles
       // - 'trialing' = CB capturée, encore en trial 7j
       // - 'active' = abonnement payé en cours
@@ -337,8 +343,19 @@ async function handleStripeEvent(event) {
       else if (obj.status === 'past_due') status = 'past_due';
       const trialEnd = obj.trial_end ? new Date(obj.trial_end * 1000) : null;
       const cancelAt = obj.cancel_at ? new Date(obj.cancel_at * 1000) : null;
+      // v1.3.756 (FIX ordering) : Stripe ne garantit PAS l'ordre de livraison des webhooks.
+      // Un customer.subscription.updated "trialing" (snapshot d'avant paiement) peut arriver
+      // APRÈS invoice.paid → l'ancien UPDATE inconditionnel rétrogradait un client PAYANT en
+      // 'trialing' (perte d'accès + expiry ramené au trial_end passé). Un abonnement ne repasse
+      // jamais active→trialing chez Stripe : on refuse ce downgrade (statut + expiry conservés).
       await query(
-        `UPDATE users SET plan = $1, plan_status = $2, plan_expires_at = $3,
+        `UPDATE users SET plan = $1,
+                          plan_status = CASE WHEN $2 = 'trialing'
+                                              AND plan_status IN ('active','active_cancelling')
+                                             THEN plan_status ELSE $2 END,
+                          plan_expires_at = CASE WHEN $2 = 'trialing'
+                                                  AND plan_status IN ('active','active_cancelling')
+                                                 THEN plan_expires_at ELSE $3 END,
                           plan_billing = $4, trial_ultra_until = COALESCE(trial_ultra_until, $5),
                           stripe_subscription_id = $6, cancel_at = $7
          WHERE id = $8`,
@@ -376,8 +393,14 @@ async function handleStripeEvent(event) {
         if (ref.stopReferralOnCancellation) await ref.stopReferralOnCancellation(userId);
         // v1.3.754 : récupère la commission déjà créditée sur le montant remboursé
         if (ref.clawbackCommissionOnRefund) {
-          const amountRefundedCents = obj.amount_refunded || obj.amount || 0;
-          await ref.clawbackCommissionOnRefund(userId, amountRefundedCents);
+          // v1.3.756 (FIX money) : sur charge.refunded, obj.amount_refunded est le total CUMULÉ
+          // remboursé sur la charge (pas le delta de CE remboursement), et Stripe émet un event
+          // PAR remboursement. Sur 2 remboursements partiels, l'ancien code reclawait le cumul à
+          // chaque event → sur-débit du parrain. On clawback sur le montant du remboursement de
+          // CET event (le plus récent = refunds.data[0]) ; fallback cumul si la liste est absente.
+          // Cas courant (1 seul remboursement) : refunds.data[0].amount === amount_refunded → idem.
+          const thisRefundCents = obj.refunds?.data?.[0]?.amount ?? obj.amount_refunded ?? obj.amount ?? 0;
+          await ref.clawbackCommissionOnRefund(userId, thisRefundCents);
         }
       } catch (e) {}
       break;
@@ -474,7 +497,12 @@ async function handleStripeEvent(event) {
             await ref.creditCommissionForPayment(userId, amountPaidCents, billingInterval);
           }
         } catch (e) {
+          // v1.3.756 : la commission parrain est money-critical → on ne l'AVALE PAS. On propage :
+          // le handler top-level supprime la marque d'idempotence et renvoie 500 → Stripe RETENTE
+          // le même event → le crédit (atomique + garde-fou optimiste) est ré-appliqué sans
+          // double-compter. L'activation du plan ci-dessus + activateReferral sont idempotentes.
           console.error('[invoice.paid commission]', e.message);
+          throw e;
         }
       }
       break;
@@ -501,6 +529,24 @@ async function handleStripeEvent(event) {
             });
           }
         } catch (e) {}
+        break;
+      }
+      // v1.3.756 (FIX) : l'absence de next_payment_attempt ne PROUVE pas que Stripe a
+      // définitivement abandonné (ça dépend de la config de dunning du compte). Avant l'action
+      // DESTRUCTIVE (cancel + effacement de la sub), on vérifie l'état réel chez Stripe. Si la
+      // sub est encore récupérable (past_due/active), on se contente de 'past_due' (accès déjà
+      // suspendu par les gates) et on laisse customer.subscription.deleted nettoyer plus tard.
+      let subTerminal = true;
+      if (subId) {
+        try {
+          const sub = await stripe.subscriptions.retrieve(subId);
+          subTerminal = ['canceled', 'incomplete_expired', 'unpaid'].includes(sub.status);
+        } catch (e) {
+          subTerminal = true; // sub introuvable côté Stripe → on la considère terminée
+        }
+      }
+      if (!subTerminal) {
+        try { await query("UPDATE users SET plan_status = 'past_due' WHERE id = $1", [userId]); } catch (e) {}
         break;
       }
       try {
