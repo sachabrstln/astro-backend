@@ -129,7 +129,13 @@ export async function sendEmail({ to, subject, html, text }) {
       body: JSON.stringify({ from, to, subject, html, text }),
     });
     const data = await r.json();
-    if (!r.ok) return { ok: false, reason: data?.message || 'resend_error', data };
+    if (!r.ok) {
+      // v1.3.758 : observabilité — un email qui rate (domaine non vérifié, from invalide,
+      // quota) doit être visible dans les logs, pas silencieux.
+      console.warn('[email] ECHEC Resend pour ' + to + ' : ' + (data?.message || 'resend_error'));
+      return { ok: false, reason: data?.message || 'resend_error', data };
+    }
+    console.log('[email] envoye a ' + to + ' (Resend id ' + (data.id || '?') + ') : ' + subject);
     return { ok: true, id: data.id };
   } catch (e) {
     return { ok: false, reason: 'network_error', message: e.message };
