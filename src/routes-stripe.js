@@ -9,7 +9,9 @@ function sha256(s) { return crypto.createHash('sha256').update(String(s).toLower
 // Helper : extrait l'IP du request (gère le proxy Render)
 function reqIp(req) { return ((req.headers['x-forwarded-for'] || req.ip || '') + '').split(',')[0].trim(); }
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// v1.3.757 : .trim() défensif — une clé collée sur Render avec un \n/espace en fin
+// casse l'en-tête Authorization (ERR_INVALID_CHAR) → tous les paiements en 500.
+const stripe = new Stripe((process.env.STRIPE_SECRET_KEY || '').trim());
 
 export default async function stripeRoutes(app) {
   // POST /stripe/checkout — crée une session Checkout pour un plan + billing donnés
@@ -217,7 +219,7 @@ export default async function stripeRoutes(app) {
     const sig = req.headers['stripe-signature'];
     let event;
     try {
-      event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET);
+      event = stripe.webhooks.constructEvent(req.rawBody, sig, (process.env.STRIPE_WEBHOOK_SECRET || '').trim());
     } catch (err) {
       app.log.error('Webhook signature fail: ' + err.message);
       return reply.code(400).send('bad signature');

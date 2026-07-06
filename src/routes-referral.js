@@ -16,7 +16,7 @@ import Stripe from 'stripe';
 import { audit } from './security.js';
 
 const stripe = process.env.STRIPE_SECRET_KEY
-  ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-12-18.acacia' })
+  ? new Stripe(process.env.STRIPE_SECRET_KEY.trim(), { apiVersion: '2024-12-18.acacia' })
   : null;
 
 // Config — v1.3.754 : commission 20% (règle produit confirmée), filleul -20% (coupon ASTRO_REFERRAL_20)
